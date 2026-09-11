@@ -216,29 +216,34 @@ def stop_job(
     job = jobs[0]
     if job["status"] in ("completed", "failed", "cancelled", "stopped"):
         return job
-    if job["status"] == "queued":
-        updated = sb_patch(
-            "outreach_jobs",
-            match={"id": f"eq.{job_id}"},
-            row={
-                "status": "cancelled",
-                "finished_at": _now(),
-                "updated_at": _now(),
-            },
-        )
-    else:
-        updated = sb_patch(
-            "outreach_jobs",
-            match={"id": f"eq.{job_id}"},
-            row={"status": "cancel_requested", "updated_at": _now()},
-        )
+    # Dashboard stop is immediate: mark stopped and free the bot.
+    # Extension will see no active job on next poll and halt.
+    updated = sb_patch(
+        "outreach_jobs",
+        match={"id": f"eq.{job_id}"},
+        row={
+            "status": "stopped" if job["status"] != "queued" else "cancelled",
+            "finished_at": _now(),
+            "updated_at": _now(),
+        },
+    )
+    sb_patch(
+        "bots",
+        match={"id": f"eq.{bot_id}"},
+        row={
+            "status": "online",
+            "current_job_id": None,
+            "updated_at": _now(),
+        },
+        return_representation=False,
+    )
     sb_insert(
         "job_events",
         {
             "job_id": job_id,
             "bot_id": bot_id,
             "level": "warn",
-            "message": "Stop requested from dashboard",
+            "message": "Stopped from dashboard",
         },
         return_representation=False,
     )

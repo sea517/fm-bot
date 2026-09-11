@@ -196,12 +196,15 @@ async function poll() {
 
   await heartbeat("online");
 
-  // If cancel requested on active job, tell content script
+  // Stop campaign if dashboard ended the job
   try {
     const active = await api(`/api/bots/${s.botId}/jobs/active`);
     const job = active?.job;
-    if (job?.status === "cancel_requested") {
-      await chrome.storage.local.set({ campaignStop: true });
+    const { activeJobId } = await chrome.storage.local.get({ activeJobId: null });
+    const shouldHalt =
+      job?.status === "cancel_requested" || (activeJobId && !job);
+    if (shouldHalt) {
+      await chrome.storage.local.set({ campaignStop: true, activeJobId: null });
       const tabs = await chrome.tabs.query({
         url: ["https://www.freelancermap.com/*", "https://www.freelancermap.de/*"],
       });
@@ -212,13 +215,11 @@ async function poll() {
           /* ignore */
         }
       }
+      if (!job) await heartbeat("online");
+      return;
     }
 
-    const { activeJobId } = await chrome.storage.local.get({ activeJobId: null });
-    // Clear stale local lock if server has no running job
-    if (activeJobId && !job) {
-      await chrome.storage.local.set({ activeJobId: null, campaignStop: false });
-    } else if (activeJobId || job?.status === "running") {
+    if (activeJobId || job?.status === "running") {
       return; // already running
     }
 

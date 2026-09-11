@@ -1,6 +1,7 @@
 const state = {
   botId: 1,
   token: localStorage.getItem("fm_dashboard_token") || "",
+  busyAction: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -17,7 +18,7 @@ async function api(path, opts = {}) {
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${t}`,
-      ...(opts.headers || {}),
+    20|      ...(opts.headers || {}),
     },
   });
   const text = await res.text();
@@ -39,36 +40,68 @@ function statusBadge(status) {
   return `<span class="badge ${s}">${s}</span>`;
 }
 
-function isJobActive(job) {
-  return job && ["queued", "running", "cancel_requested"].includes(job.status);
+/** Job still owns the bot (show Stop). */
+function isJobRunning(job) {
+  return job && ["queued", "running"].includes(job.status);
 }
 
 function setRunControls(running) {
   $("btnStart").classList.toggle("hidden", running);
   $("btnStop").classList.toggle("hidden", !running);
+  if (!running) {
+    $("btnStop").textContent = "Stop";
+    $("btnStop").disabled = false;
+  }
+  if (running) {
+    $("btnStart").textContent = "Start";
+    $("btnStart").disabled = false;
+  }
+}
+
+function setActionBusy(which, busy, label) {
+  state.busyAction = busy;
+  const start = $("btnStart");
+  const stop = $("btnStop");
+  const refresh = $("btnRefresh");
+  if (which === "start") {
+    start.disabled = busy;
+    start.textContent = busy ? label || "Starting…" : "Start";
+  }
+  if (which === "stop") {
+    stop.disabled = busy;
+    stop.textContent = busy ? label || "Stopping…" : "Stop";
+  }
+  refresh.disabled = busy;
+}
+
+async function findActiveJob(bot) {
+  let job = bot.current_job;
+  if (isJobRunning(job)) return job;
+  const jobs = await api(`/api/bots/${state.botId}/jobs?limit=10`);
+  return jobs.find((j) => isJobRunning(j)) || null;
 }
 
 async function refreshBot() {
+  if (state.busyAction) return;
   const bot = await api(`/api/bots/${state.botId}`);
-  let job = bot.current_job;
-  if (!isJobActive(job)) {
-    const jobs = await api(`/api/bots/${state.botId}/jobs?limit=5`);
-    job = jobs.find((j) => isJobActive(j)) || job || null;
-  }
-  const running = isJobActive(job) || bot.status === "busy";
+  const job = await findActiveJob(bot);
+  const running = Boolean(job);
   setRunControls(running);
 
   const jobLine = job
     ? `Job #${job.id} [${job.status}] keyword="${job.keyword}" dry_run=${job.dry_run}`
-    : "No current job";
+    : bot.current_job
+      ? `Last: #${bot.current_job.id} [${bot.current_job.status}]`
+      : "No current job";
   $("botCard").innerHTML =
     `<div><strong>${bot.label || "Bot " + bot.id}</strong> ${statusBadge(bot.status)}</div>` +
     `<div>Last heartbeat: ${bot.last_heartbeat_at || "—"}</div>` +
     `<div>${jobLine}</div>` +
     (bot.last_error ? `<div>Error: ${bot.last_error}</div>` : "");
 
-  if (job?.id) {
-    const events = await api(`/api/jobs/${job.id}/events?limit=50`);
+  const logJobId = job?.id || bot.current_job?.id;
+  if (logJobId) {
+    const events = await api(`/api/jobs/${logJobId}/events?limit=50`);
     $("jobLog").textContent = events.length
       ? events
           .map((e) => `${e.created_at} [${e.level}] ${e.message}`)
@@ -127,15 +160,20 @@ document.querySelectorAll(".tab").forEach((tab) => {
   });
 });
 
-$("btnRefresh").addEventListener("click", () => refreshAll().catch((e) => alert(e.message)));
+$("btnRefresh").addEventListener("click", () => {
+  if (state.busyAction) return;
+  refreshAll().catch((e) => alert(e.message));
+});
 
 $("btnStart").addEventListener("click", async () => {
+  if (state.busyAction) return;
   try {
     const keyword = $("keyword").value.trim();
     if (!keyword) {
       alert("Enter a keyword in Outreach first");
       return;
     }
+    setActionBusy("start", true, "Starting…");
     const body = {
       keyword,
       min_interval_sec: Number($("minInterval").value),
@@ -148,30 +186,36 @@ $("btnStart").addEventListener("click", async () => {
       body: JSON.stringify(body),
     });
     setRunControls(true);
-    await refreshAll();
   } catch (e) {
     alert(e.message);
+    setRunControls(false);
+  } finally {
+    setActionBusy("start", false);
+    await refreshAll().catch(() => {});
   }
 });
 
 $("btnStop").addEventListener("click", async () => {
+  if (state.busyAction) return;
   try {
+    setActionBusy("stop", true, "Stopping…");
     const bot = await api(`/api/bots/${state.botId}`);
-    let jobId = bot.current_job_id || bot.current_job?.id;
-    if (!jobId) {
-      const jobs = await api(`/api/bots/${state.botId}/jobs?limit=5`);
-      const active = jobs.find((j) => isJobActive(j));
-      if (!active) {
-        alert("No active job");
-        setRunControls(false);
-        return;
-      }
-      jobId = active.id;
+    let job = await findActiveJob(bot);
+    if (!job && bot.current_job_id) {
+      job = { id: bot.current_job_id };
     }
-    await api(`/api/bots/${state.botId}/jobs/${jobId}/stop`, { method: "POST" });
-    await refreshAll();
+    if (!job?.id) {
+      setRunControls(false);
+      return;
+    }
+    await api(`/api/bots/${state.botId}/jobs/${job.id}/stop`, { method: "POST" });
+    // Switch to Start immediately — server marks job stopped.
+    setRunControls(false);
   } catch (e) {
     alert(e.message);
+  } finally {
+    setActionBusy("stop", false);
+    await refreshAll().catch(() => {});
   }
 });
 
