@@ -109,7 +109,7 @@ DATABASE_URL = _optional("DATABASE_URL", f"sqlite:///{DATA_DIR / 'bot.db'}")
 SUPABASE_URL = _optional("SUPABASE_URL").strip().rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = _optional("SUPABASE_SERVICE_ROLE_KEY").strip()
 
-# Control plane (dashboard on VPS + Chrome extension workers)
+# Control plane (dashboard on Vercel + Chrome extension workers)
 DASHBOARD_API_TOKEN = _optional("DASHBOARD_API_TOKEN").strip()
 BOT_TOKENS: dict[int, str] = {
     1: _optional("BOT_1_TOKEN").strip(),
