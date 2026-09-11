@@ -101,8 +101,8 @@
     const kw = (keyword || "").trim();
     if (!kw) throw new Error("empty keyword");
 
-    // Prefer staying on /freelancer search.
-    if (!/\/freelancer/i.test(location.pathname + location.href)) {
+    // Prefer staying on /freelancer search (DM outreach only).
+    if (!/\/freelancer/i.test(location.pathname + location.href) || /\/app\/pobox/i.test(location.href)) {
       location.href = "https://www.freelancermap.com/freelancer";
       await sleep(2500);
     }
@@ -155,8 +155,78 @@
     }
 
     await emitLog(`Searching for “${kw}”…`);
+    // Persist so a full-page navigation can resume and still report the count.
+    try {
+      const { pendingCampaign } = await chrome.storage.local.get({
+        pendingCampaign: null,
+      });
+      if (pendingCampaign?.settings) {
+        await chrome.storage.local.set({
+          pendingCampaign: {
+            ...pendingCampaign,
+            phase: "await_results",
+            startedAt: pendingCampaign.startedAt || Date.now(),
+          },
+        });
+      }
+    } catch (_e) {
+      /* ignore */
+    }
     await sleep(2500);
     return true;
+  }
+
+  function parseFreelancerCount(text) {
+    if (!text) return null;
+    const patterns = [
+      /([\d]{1,3}(?:[.,\u00a0\s]\d{3})+|\d+)\s*freelancers?\b/i,
+      /([\d]{1,3}(?:[.,\u00a0\s]\d{3})+|\d+)\s*freelancer\b/i,
+    ];
+    for (const re of patterns) {
+      const m = String(text).match(re);
+      if (!m) continue;
+      const n = Number.parseInt(m[1].replace(/[.,\u00a0\s]/g, ""), 10);
+      if (Number.isFinite(n) && n >= 0) return n;
+    }
+    return null;
+  }
+
+  /** Total from the results heading, e.g. "79,097 freelancers". */
+  function readSearchResultCount() {
+    const headings = qsa("h1, h2, h3, [class*='result'], [class*='Result'], main, [role='main']");
+    for (const el of headings) {
+      if (!visible(el)) continue;
+      const n = parseFreelancerCount((el.textContent || "").trim());
+      if (n != null) return n;
+    }
+    // Fallback: first match in visible page text (avoid huge scans)
+    const body = (document.body?.innerText || "").slice(0, 8000);
+    return parseFreelancerCount(body);
+  }
+
+  async function waitForSearchResults(timeoutMs = 20000) {
+    const start = Date.now();
+    let lastCount = null;
+    while (Date.now() - start < timeoutMs) {
+      const total = readSearchResultCount();
+      const cards = collectProfileCards();
+      if (total != null) {
+        // Stable for one tick, or we already have cards
+        if (lastCount === total || cards.length > 0) {
+          return { total, cards };
+        }
+        lastCount = total;
+      } else if (cards.length > 0 && Date.now() - start > 4000) {
+        return { total: cards.length, cards };
+      }
+      await sleep(800);
+    }
+    const cards = collectProfileCards();
+    const total = readSearchResultCount();
+    return {
+      total: total != null ? total : cards.length,
+      cards,
+    };
   }
 
   function collectProfileCards() {
@@ -363,7 +433,14 @@
     }
     campaignRunning = true;
     activeJobId = settings.jobId || null;
-    await chrome.storage.local.set({ campaignStop: false });
+    await chrome.storage.local.set({
+      campaignStop: false,
+      pendingCampaign: {
+        settings,
+        phase: settings.skipSearch ? "await_results" : "search",
+        startedAt: Date.now(),
+      },
+    });
 
     const stats = {
       attempted: 0,
@@ -398,25 +475,42 @@
     }
 
     try {
-      const okSearch = await runSearch(settings.keyword);
-      if (!okSearch) {
-        finishStatus = "failed";
-        finishError = "search_failed";
-        await finishJob(finishStatus, stats, finishError);
-        return { ok: false, reason: "search_failed", stats };
+      if (!settings.skipSearch) {
+        const okSearch = await runSearch(settings.keyword);
+        if (!okSearch) {
+          finishStatus = "failed";
+          finishError = "search_failed";
+          await finishJob(finishStatus, stats, finishError);
+          return { ok: false, reason: "search_failed", stats };
+        }
+      } else {
+        await emitLog("Resuming after search page load…");
+        await sleep(1500);
       }
 
-      let cards = collectProfileCards();
-      await emitLog(`Found ${cards.length} profile link(s) on page.`);
+      const { total, cards: initialCards } = await waitForSearchResults();
+      let cards = initialCards;
+      await emitLog(
+        total != null
+          ? `Search shows ${total.toLocaleString()} freelancers (page cards: ${cards.length}).`
+          : `Found ${cards.length} profile link(s) on page (no total count in UI).`
+      );
       await pushLiveStats({
-        profiles_found: cards.length,
+        profiles_found: Math.max(0, Number(total) || cards.length || 0),
         contacted_since_search: 0,
       });
-      if (!cards.length) {
+      if (!cards.length && !(total > 0)) {
         finishStatus = "failed";
         finishError = "no_results";
         await finishJob(finishStatus, stats, finishError);
         return { ok: false, reason: "no_results", stats };
+      }
+      if (!cards.length) {
+        // Total exists but cards not scraped — still keep count on dashboard; fail outreach.
+        finishStatus = "failed";
+        finishError = "no_profile_cards";
+        await finishJob(finishStatus, stats, finishError);
+        return { ok: false, reason: "no_profile_cards", stats };
       }
 
       const limit = Math.max(1, Number(settings.limit) || 10);
@@ -479,7 +573,9 @@
             settings.minIntervalSec,
             settings.maxIntervalSec
           );
-          await emitLog(`Waiting ${Math.round(waitMs / 1000)}s before next DM…`);
+          await emitLog(
+            `Waiting ${Math.round(waitMs / 1000)}s before next DM (random ${settings.minIntervalSec}–${settings.maxIntervalSec}s)…`
+          );
           const end = Date.now() + waitMs;
           while (Date.now() < end) {
             if (await shouldStop()) {
@@ -510,6 +606,44 @@
     } finally {
       campaignRunning = false;
       activeJobId = null;
+      try {
+        await chrome.storage.local.remove("pendingCampaign");
+      } catch (_e) {
+        /* ignore */
+      }
+    }
+  }
+
+  async function maybeResumePendingCampaign() {
+    try {
+      const store = await chrome.storage.local.get({
+        pendingCampaign: null,
+        campaignStop: false,
+        activeJobId: null,
+      });
+      if (store.campaignStop || !store.pendingCampaign?.settings) return;
+      if (!store.activeJobId && !store.pendingCampaign.settings.jobId) return;
+      if (Date.now() - (store.pendingCampaign.startedAt || 0) > 45 * 60 * 1000) {
+        await chrome.storage.local.remove("pendingCampaign");
+        return;
+      }
+      if (!/freelancermap\.(com|de)/i.test(location.hostname)) return;
+      if (!/\/freelancer/i.test(location.pathname + location.href)) return;
+      if (campaignRunning) return;
+
+      const phase = store.pendingCampaign.phase || "search";
+      // Only auto-resume after a navigation that interrupted the search/results wait.
+      if (phase !== "await_results" && phase !== "search") return;
+
+      const settings = {
+        ...store.pendingCampaign.settings,
+        skipSearch: true,
+        jobId: store.pendingCampaign.settings.jobId || store.activeJobId,
+      };
+      await emitLog("Page reloaded during search — resuming campaign.");
+      runCampaign(settings);
+    } catch (e) {
+      console.warn("[FM Outreach] resume failed", e);
     }
   }
 
@@ -546,4 +680,7 @@
     }
     return false;
   });
+
+  // If Find freelancers caused a full navigation, pick up again on the results page.
+  maybeResumePendingCampaign();
 })();

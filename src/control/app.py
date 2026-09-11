@@ -682,37 +682,67 @@ def outreach_stats(
     contacted = None
     profiles_found = None
     last_search_at = None
-    if kw:
+    matched_keyword = None
+
+    def _apply_job(j: dict) -> bool:
+        nonlocal available, contacted, profiles_found, last_search_at, matched_keyword
+        stats = j.get("stats") or {}
+        found = stats.get("profiles_found")
+        if found is None:
+            return False
+        try:
+            profiles_found = max(0, int(found))
+        except (TypeError, ValueError):
+            return False
+        try:
+            contacted = max(0, int(stats.get("contacted_since_search") or 0))
+        except (TypeError, ValueError):
+            contacted = 0
+        available = max(0, profiles_found - contacted)
+        last_search_at = (
+            j.get("started_at") or j.get("finished_at") or j.get("created_at")
+        )
+        matched_keyword = j.get("keyword")
+        return True
+
+    # Prefer the bot's active/running job so the dashboard updates mid-search.
+    active = sb_get(
+        "outreach_jobs",
+        params={
+            "bot_id": f"eq.{bot_id}",
+            "status": "in.(queued,running)",
+            "select": "id,keyword,stats,started_at,finished_at,created_at,status",
+            "order": "created_at.desc",
+            "limit": "5",
+        },
+    )
+    for j in active:
+        if kw and (j.get("keyword") or "").strip().lower() != kw.lower():
+            continue
+        if _apply_job(j):
+            break
+
+    if profiles_found is None:
         jobs = sb_get(
             "outreach_jobs",
             params={
                 "bot_id": f"eq.{bot_id}",
-                "keyword": f"eq.{kw}",
-                "select": "id,stats,started_at,finished_at,created_at,status",
+                "select": "id,keyword,stats,started_at,finished_at,created_at,status",
                 "order": "created_at.desc",
-                "limit": "20",
+                "limit": "30",
             },
         )
         for j in jobs:
-            stats = j.get("stats") or {}
-            found = stats.get("profiles_found")
-            if found is None:
+            job_kw = (j.get("keyword") or "").strip()
+            if kw and job_kw.lower() != kw.lower():
                 continue
-            try:
-                profiles_found = max(0, int(found))
-            except (TypeError, ValueError):
+            if not kw and j.get("status") not in ("running", "completed", "stopped", "failed"):
                 continue
-            try:
-                contacted = max(0, int(stats.get("contacted_since_search") or 0))
-            except (TypeError, ValueError):
-                contacted = 0
-            available = max(0, profiles_found - contacted)
-            last_search_at = (
-                j.get("started_at") or j.get("finished_at") or j.get("created_at")
-            )
-            break
+            if _apply_job(j):
+                break
+
     return {
-        "keyword": kw or None,
+        "keyword": matched_keyword or (kw or None),
         "profiles_found": profiles_found,
         "contacted": contacted,
         "available": available,

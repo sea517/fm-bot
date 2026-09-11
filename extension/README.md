@@ -1,7 +1,12 @@
 # Freelancermap Outreach Extension
 
 Chrome MV3 worker that claims outreach jobs from the **Control dashboard** and
-drives the Contact form on [freelancermap.com](https://www.freelancermap.com/freelancer).
+runs **two tabs in parallel**:
+
+| Role | URL |
+|------|-----|
+| Send DMs / search | https://www.freelancermap.com/freelancer |
+| Assessment chat | https://www.freelancermap.com/app/pobox/main |
 
 Full deploy (Vercel): [docs/DEPLOY_DASHBOARD.md](../docs/DEPLOY_DASHBOARD.md).
 
@@ -10,10 +15,28 @@ Full deploy (Vercel): [docs/DEPLOY_DASHBOARD.md](../docs/DEPLOY_DASHBOARD.md).
 1. Chrome → `chrome://extensions`
 2. Enable **Developer mode**
 3. **Load unpacked** → this `extension/` folder
-4. Open https://www.freelancermap.com/freelancer (logged in)
+4. Stay logged into freelancermap (same profile)
 5. Popup: set **Bot ID**, **Control API URL**, **Bot token** → Save & connect
 
 Use a **different Chrome profile** per freelancermap account (Bot 1 / 2 / 3).
+
+## How DM + chat run at the same time
+
+The service worker keeps **two dedicated tabs**:
+
+1. **Outreach tab** — `/freelancer` for keyword search + Contact DMs  
+2. **Inbox tab** — `/app/pobox/main` for reading replies and sending assessment chat  
+
+Outreach never navigates the inbox tab, and inbox polling is **not paused** while a DM campaign is running.
+
+## Timing
+
+| Loop | Interval |
+|------|----------|
+| Claim / manage outreach jobs | ~12s |
+| Check inbox for replies | **20s** |
+| Delay before sending a chat reply | **Random 5–120s per reply** (longer answers bias higher; never the same wait twice in a row) |
+| Delay between Contact DMs | **Random** between dashboard min/max interval (default 240–300s) |
 
 ## Popup
 
@@ -31,7 +54,7 @@ Select the **project** in the Contact form yourself — the extension fills subj
 
 1. Dashboard on Vercel (e.g. `https://fm-bot.vercel.app`)
 2. Dashboard: create job on Bot N (start with **Dry run**)
-3. Extension on profile N claims the job and runs the campaign
+3. Extension claims the job on `/freelancer`; inbox keeps polling `/app/pobox/main`
 4. Events + finish status appear in the dashboard job log
 
 ## Message template

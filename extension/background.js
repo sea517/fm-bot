@@ -1,9 +1,11 @@
-/* Background: heartbeat + claim outreach jobs + assessment inbox chat. */
+/* Background: outreach on /freelancer + inbox chat on /app/pobox/main in parallel. */
 
 const DEFAULT_API_BASE_URL = "https://fm-bot.vercel.app";
-const POLL_MS = 12000;
-const CHAT_POLL_EVERY = 3; // every N poll cycles (~36s) run an inbox pass
-let pollCycle = 0;
+const OUTREACH_URL = "https://www.freelancermap.com/freelancer";
+const INBOX_URL = "https://www.freelancermap.com/app/pobox/main";
+
+const JOB_POLL_MS = 12000;
+const CHAT_POLL_MS = 20000;
 
 async function settings() {
   const s = await chrome.storage.sync.get({
@@ -55,23 +57,61 @@ async function heartbeat(status = "online", last_error = null) {
   }
 }
 
-async function ensureFreelancerTab(preferMessages = false) {
+function isOutreachUrl(url) {
+  return /freelancermap\.(com|de)\/freelancer(?!\/)/i.test(url || "") ||
+    /freelancermap\.(com|de)\/freelancer(\?|$)/i.test(url || "");
+}
+
+function isInboxUrl(url) {
+  return /\/app\/pobox/i.test(url || "") || /\/pobox/i.test(url || "");
+}
+
+async function findTabBy(pred) {
   const tabs = await chrome.tabs.query({
     url: ["https://www.freelancermap.com/*", "https://www.freelancermap.de/*"],
   });
-  if (preferMessages) {
-    const msgTab = tabs.find((t) =>
-      /pobox|messages|conversation|chat/i.test(t.url || "")
-    );
-    if (msgTab) return msgTab;
+  return tabs.find((t) => pred(t.url || "")) || null;
+}
+
+/** Keep a dedicated search/DM tab (never reuse the inbox tab). */
+async function ensureOutreachTab({ activate = false } = {}) {
+  let tab = await findTabBy(isOutreachUrl);
+  if (!tab) {
+    // Prefer any non-inbox freelancermap tab, else create.
+    const tabs = await chrome.tabs.query({
+      url: ["https://www.freelancermap.com/*", "https://www.freelancermap.de/*"],
+    });
+    tab = tabs.find((t) => !isInboxUrl(t.url || "")) || null;
   }
-  if (tabs[0]) return tabs[0];
-  return chrome.tabs.create({
-    url: preferMessages
-      ? "https://www.freelancermap.com/pobox"
-      : "https://www.freelancermap.com/freelancer",
-    active: true,
-  });
+  if (!tab) {
+    tab = await chrome.tabs.create({ url: OUTREACH_URL, active: activate });
+  } else if (!isOutreachUrl(tab.url || "") && !/\/freelancer\//i.test(tab.url || "")) {
+    await chrome.tabs.update(tab.id, { url: OUTREACH_URL, active: activate });
+    await sleep(2000);
+  } else if (activate) {
+    await chrome.tabs.update(tab.id, { active: true });
+  }
+  await chrome.storage.local.set({ outreachTabId: tab.id });
+  return tab;
+}
+
+/** Keep a dedicated inbox tab for assessment chat. */
+async function ensureInboxTab({ activate = false } = {}) {
+  let tab = await findTabBy(isInboxUrl);
+  if (!tab) {
+    tab = await chrome.tabs.create({ url: INBOX_URL, active: activate });
+  } else if (!/\/app\/pobox/i.test(tab.url || "")) {
+    await chrome.tabs.update(tab.id, { url: INBOX_URL, active: activate });
+    await sleep(2000);
+  } else if (activate) {
+    await chrome.tabs.update(tab.id, { active: true });
+  }
+  await chrome.storage.local.set({ inboxTabId: tab.id });
+  return tab;
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 const CONTENT_SCRIPTS = [
@@ -106,8 +146,8 @@ async function reportEvent(botId, jobId, message, level = "info") {
 
 async function runClaimedJob(job) {
   const s = await settings();
-  const tab = await ensureFreelancerTab(false);
-  await chrome.tabs.update(tab.id, { active: true });
+  // Outreach always uses /freelancer — never the inbox tab.
+  const tab = await ensureOutreachTab({ activate: true });
   await reportEvent(s.botId, job.id, `Starting campaign keyword=${job.keyword}`);
 
   const campaignSettings = {
@@ -131,6 +171,9 @@ async function runClaimedJob(job) {
   });
 
   await heartbeat("busy");
+  // Ensure inbox tab exists so chat can keep polling in parallel.
+  ensureInboxTab({ activate: false }).catch(() => {});
+
   const result = await sendToTab(tab.id, {
     type: "FM_START_CAMPAIGN",
     settings: campaignSettings,
@@ -139,20 +182,22 @@ async function runClaimedJob(job) {
   console.info("campaign start ack", result);
 }
 
+/**
+ * Inbox chat runs on its own tab and is never blocked by outreach.
+ * Two Chrome tabs = DM campaign + chat at the same time.
+ */
 async function runInboxChatPass() {
   const s = await settings();
   if (!s.enabled || !s.botToken) return;
-  const { activeJobId } = await chrome.storage.local.get({ activeJobId: null });
-  if (activeJobId) return; // don't interrupt outreach
+  const { chatPassBusy } = await chrome.storage.local.get({ chatPassBusy: false });
+  if (chatPassBusy) return;
 
   try {
-    const tab = await ensureFreelancerTab(true);
-    if (!/pobox|messages|conversation|chat/i.test(tab.url || "")) {
-      await chrome.tabs.update(tab.id, {
-        url: "https://www.freelancermap.com/pobox",
-        active: false,
-      });
-      await new Promise((r) => setTimeout(r, 2500));
+    await chrome.storage.local.set({ chatPassBusy: true });
+    const tab = await ensureInboxTab({ activate: false });
+    if (!/\/app\/pobox/i.test(tab.url || "")) {
+      await chrome.tabs.update(tab.id, { url: INBOX_URL, active: false });
+      await sleep(2500);
     }
     const result = await sendToTab(tab.id, { type: "FM_CHAT_PASS" });
     if (result?.results?.length) {
@@ -160,6 +205,8 @@ async function runInboxChatPass() {
     }
   } catch (e) {
     console.warn("inbox chat pass failed", e);
+  } finally {
+    await chrome.storage.local.set({ chatPassBusy: false });
   }
 }
 
@@ -301,12 +348,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return false;
 });
 
-async function poll() {
+async function pollJobs() {
   const s = await settings();
   if (!s.enabled || !s.apiBaseUrl || !s.botToken) return;
-
-  await heartbeat("online");
-  pollCycle += 1;
 
   try {
     const active = await api(`/api/bots/${s.botId}/jobs/active`);
@@ -316,12 +360,10 @@ async function poll() {
       job?.status === "cancel_requested" || (activeJobId && !job);
     if (shouldHalt) {
       await chrome.storage.local.set({ campaignStop: true, activeJobId: null });
-      const tabs = await chrome.tabs.query({
-        url: ["https://www.freelancermap.com/*", "https://www.freelancermap.de/*"],
-      });
-      for (const tab of tabs) {
+      const outreach = await findTabBy(isOutreachUrl);
+      if (outreach) {
         try {
-          await chrome.tabs.sendMessage(tab.id, { type: "FM_STOP_CAMPAIGN" });
+          await chrome.tabs.sendMessage(outreach.id, { type: "FM_STOP_CAMPAIGN" });
         } catch (_e) {
           /* ignore */
         }
@@ -331,34 +373,45 @@ async function poll() {
     }
 
     if (activeJobId || job?.status === "running") {
-      return; // already running outreach
-    }
-
-    const claimed = await api(`/api/bots/${s.botId}/jobs/claim`, { method: "POST" });
-    if (claimed?.job) {
-      await runClaimedJob(claimed.job);
+      await heartbeat("busy");
       return;
     }
 
-    // No outreach job — periodically process inbox replies
-    if (pollCycle % CHAT_POLL_EVERY === 0) {
-      await runInboxChatPass();
+    await heartbeat("online");
+    const claimed = await api(`/api/bots/${s.botId}/jobs/claim`, { method: "POST" });
+    if (claimed?.job) {
+      await runClaimedJob(claimed.job);
     }
   } catch (e) {
-    console.warn("poll error", e);
+    console.warn("job poll error", e);
     await heartbeat("error", String(e.message || e));
   }
 }
 
-function scheduleNextPoll() {
-  chrome.alarms.create("fm_poll", { when: Date.now() + POLL_MS });
+async function pollChat() {
+  const s = await settings();
+  if (!s.enabled || !s.apiBaseUrl || !s.botToken) return;
+  await runInboxChatPass();
+}
+
+function scheduleJobPoll() {
+  chrome.alarms.create("fm_jobs", { when: Date.now() + JOB_POLL_MS });
+}
+
+function scheduleChatPoll() {
+  chrome.alarms.create("fm_chat", { when: Date.now() + CHAT_POLL_MS });
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "fm_poll") {
-    poll().finally(scheduleNextPoll);
+  if (alarm.name === "fm_jobs") {
+    pollJobs().finally(scheduleJobPoll);
+  }
+  if (alarm.name === "fm_chat") {
+    pollChat().finally(scheduleChatPoll);
   }
 });
 
-scheduleNextPoll();
-poll();
+scheduleJobPoll();
+scheduleChatPoll();
+pollJobs();
+pollChat();

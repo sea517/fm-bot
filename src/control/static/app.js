@@ -87,38 +87,36 @@ async function findActiveJob(bot) {
   return jobs.find((j) => isJobRunning(j)) || null;
 }
 
-async function refreshKeywordStats() {
+async function refreshKeywordStats(activeJob = null) {
   if (!token()) {
     $("statAvailable").textContent = "—";
     $("statContacted").textContent = "—";
     return;
   }
-  const keyword = $("keyword").value.trim();
+  // While a job runs, use its keyword so counts update even if the input differs.
+  const keyword = (activeJob?.keyword || $("keyword").value || "").trim();
+  if (activeJob?.keyword && !$("keyword").value.trim()) {
+    $("keyword").value = activeJob.keyword;
+  }
   const qs = keyword ? `?keyword=${encodeURIComponent(keyword)}` : "";
   try {
     const s = await api(`/api/bots/${state.botId}/outreach-stats${qs}`);
-    if (!keyword) {
-      $("statAvailable").textContent = "—";
-      $("statContacted").textContent = "—";
-      $("statAvailable").title = "Enter a keyword to load counts for the last search";
-      $("statContacted").title = "";
-      return;
-    }
     if (s.profiles_found == null) {
       $("statAvailable").textContent = "—";
       $("statContacted").textContent = "—";
-      $("statAvailable").title =
-        "No search yet for this keyword — Start a job (dry run is fine) to count results";
+      $("statAvailable").title = keyword
+        ? "Waiting for search results from the extension…"
+        : "Enter a keyword and Start a job to count freelancers";
       $("statContacted").title = "";
       return;
     }
     $("statContacted").textContent = String(s.contacted ?? 0);
-    $("statAvailable").textContent = String(s.available ?? 0);
+    $("statAvailable").textContent = Number(s.available ?? 0).toLocaleString();
     $("statContacted").title =
-      "Contacted since last search for this keyword (counts even if Supabase ledger write fails)";
+      "Contacted since last search for this keyword";
     $("statAvailable").title = s.last_search_at
-      ? `Remaining = found (${s.profiles_found}) − contacted · last search ${s.last_search_at}`
-      : `Remaining = found (${s.profiles_found}) − contacted`;
+      ? `Freelancers from FM search (${s.profiles_found?.toLocaleString?.() ?? s.profiles_found}) − contacted · ${s.last_search_at}`
+      : `Freelancers from FM search (${s.profiles_found}) − contacted`;
   } catch (e) {
     $("statAvailable").textContent = "—";
     $("statContacted").textContent = "—";
@@ -162,7 +160,7 @@ async function refreshBot() {
     `<div>${jobLine}</div>` +
     (bot.last_error ? `<div>Error: ${bot.last_error}</div>` : "");
 
-  await refreshKeywordStats();
+  await refreshKeywordStats(job);
 
   const logJobId = job?.id || bot.current_job?.id;
   if (logJobId) {
@@ -301,4 +299,4 @@ if (state.token) {
 
 setInterval(() => {
   if (token()) refreshBot().catch(() => {});
-}, 10000);
+}, 5000);

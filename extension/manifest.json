@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Freelancermap Outreach",
-  "version": "0.3.0",
-  "description": "Worker for Freelancermap Control — outreach DMs + assessment chat replies.",
+  "version": "0.3.3",
+  "description": "FM Control worker — DMs on /freelancer + chat on /app/pobox/main (parallel tabs).",
   "action": {
     "default_title": "Freelancermap Outreach",
     "default_popup": "popup.html",
