@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from src.ai.outreach_personalize import generate_unique_outreach_dm
 from src.assessment.engine import process_freelancer_message
 from src.control import auth
 from src.control.db import sb_get, sb_insert, sb_patch, sb_upsert, supabase_ok
@@ -25,6 +27,7 @@ from src.control.schemas import (
     HeartbeatBody,
     JobEventBody,
     JobStatsBody,
+    OutreachPersonalizeBody,
 )
 
 logger = logging.getLogger(__name__)
@@ -860,6 +863,37 @@ def upsert_applicant(
         },
     )
     return rows[0]
+
+
+@app.post("/api/bots/{bot_id}/outreach/personalize")
+def outreach_personalize(
+    bot_id: int,
+    body: OutreachPersonalizeBody,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Extension: DeepSeek unique DM based on shared contact-form + profile."""
+    auth.require_bot(bot_id, authorization)
+    if bot_id not in (1, 2, 3):
+        raise HTTPException(404)
+
+    result = generate_unique_outreach_dm(
+        display_name=body.display_name or "",
+        title=body.title or "",
+        location=body.location or "",
+        skills=body.skills or "",
+        experience=body.experience or "",
+        subject=body.subject or "",
+        message_body=body.message_body or "",
+        project_hint=body.project_hint or body.subject or "",
+    )
+
+    return {
+        "detail": result.detail,
+        "subject": result.subject,
+        "body": result.body,
+        "source": result.source,
+        "model": "deepseek/deepseek-v4-flash-0731",
+    }
 
 
 @app.post("/api/bots/{bot_id}/chat/turn")

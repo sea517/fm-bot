@@ -144,42 +144,176 @@ async function reportEvent(botId, jobId, message, level = "info") {
   }
 }
 
-async function runClaimedJob(job) {
-  const s = await settings();
-  // Outreach always uses /freelancer — never the inbox tab.
-  const tab = await ensureOutreachTab({ activate: true });
-  await reportEvent(s.botId, job.id, `Starting campaign keyword=${job.keyword}`);
+function jobSearchUrl(keyword) {
+  const u = new URL(OUTREACH_URL);
+  if (keyword) u.searchParams.set("query", String(keyword).trim());
+  return u.toString();
+}
 
+function isDryRunJob(job) {
+  return job?.dry_run === true || job?.dry_run === "true";
+}
+
+async function pingTabCampaign(tabId) {
+  try {
+    const res = await sendToTab(tabId, { type: "FM_PING" });
+    return Boolean(res?.campaignRunning);
+  } catch (_e) {
+    return false;
+  }
+}
+
+/**
+ * Start or revive outreach. Never tear down an in-progress profile/DM by
+ * re-navigating to search while a campaign is alive.
+ */
+async function runClaimedJob(job, { revive = false } = {}) {
+  const s = await settings();
+  const dry = isDryRunJob(job);
+  const searchUrl = jobSearchUrl(job.keyword);
+
+  // If ANY freelancermap tab already runs a campaign, do not restart.
+  const allTabs = await chrome.tabs.query({
+    url: ["https://www.freelancermap.com/*", "https://www.freelancermap.de/*"],
+  });
+  for (const t of allTabs) {
+    if (isInboxUrl(t.url || "")) continue;
+    if (await pingTabCampaign(t.id)) {
+      await heartbeat("busy");
+      return;
+    }
+  }
+
+  let tab = await ensureOutreachTab({ activate: true });
+  const url = tab.url || "";
+  const onProfile = /\/freelancer\/[^/?#]+/i.test(url);
+  const onListing =
+    /\/freelancer\/?(\?|$)/i.test(url) || /\/freelancer\?/i.test(url);
+  let currentQ = "";
+  try {
+    currentQ = new URL(url).searchParams.get("query") || "";
+  } catch (_e) {
+    /* ignore */
+  }
+  const queryOk =
+    currentQ.trim().toLowerCase() === String(job.keyword || "").trim().toLowerCase();
+
+  // If we landed on a detail/skill URL with no live campaign, go back to search —
+  // profile panels are usually modals on the SERP, not separate /freelancer/slug pages.
+  if (revive && onProfile) {
+    await reportEvent(
+      s.botId,
+      job.id,
+      "Revive from detail URL — returning to search results (profile opens as panel on SERP)"
+    );
+    await chrome.tabs.update(tab.id, { url: searchUrl, active: true });
+    await sleep(4500);
+    try {
+      tab = await chrome.tabs.get(tab.id);
+    } catch (_e) {
+      tab = await ensureOutreachTab({ activate: true });
+    }
+    if (await pingTabCampaign(tab.id)) {
+      await heartbeat("busy");
+      return;
+    }
+    await startCampaignInTab(tab, job, {
+      dry,
+      skipSearch: true,
+      resumeProfile: false,
+      revive: true,
+    });
+    return;
+  }
+
+  // Fresh start or revive on listing: only navigate when query missing.
+  const needNav = !onListing || !queryOk;
+  if (needNav && !onProfile) {
+    await reportEvent(
+      s.botId,
+      job.id,
+      `${revive ? "Revive" : "Start"}: opening search ${searchUrl}`
+    );
+    await chrome.tabs.update(tab.id, { url: searchUrl, active: true });
+    await sleep(4500);
+    try {
+      tab = await chrome.tabs.get(tab.id);
+    } catch (_e) {
+      tab = await ensureOutreachTab({ activate: true });
+    }
+  }
+
+  // Re-check after possible navigation
+  if (await pingTabCampaign(tab.id)) {
+    await heartbeat("busy");
+    return;
+  }
+
+  await startCampaignInTab(tab, job, {
+    dry,
+    skipSearch: true,
+    resumeProfile: false,
+    revive,
+  });
+}
+
+async function startCampaignInTab(tab, job, { dry, skipSearch, resumeProfile, revive }) {
+  const s = await settings();
   const campaignSettings = {
     keyword: job.keyword,
     subject: job.subject || "",
     messageBody: job.message_body || "",
-    minIntervalSec: job.min_interval_sec,
-    maxIntervalSec: job.max_interval_sec,
-    limit: job.max_freelancers,
-    dryRun: job.dry_run,
+    minIntervalSec: Number(job.min_interval_sec) || 240,
+    maxIntervalSec: Number(job.max_interval_sec) || 300,
+    limit: Number(job.max_freelancers) || 10,
+    dryRun: dry,
     apiBaseUrl: s.apiBaseUrl,
     botId: s.botId,
     botToken: s.botToken,
     jobId: job.id,
+    skipSearch: Boolean(skipSearch),
+    resumeProfile: Boolean(resumeProfile),
   };
 
   await chrome.storage.local.set({
     campaignStop: false,
     activeJobId: job.id,
     activeBotId: s.botId,
+    pendingCampaign: {
+      settings: campaignSettings,
+      phase: resumeProfile ? "on_profile" : "await_results",
+      startedAt: Date.now(),
+    },
   });
 
   await heartbeat("busy");
-  // Ensure inbox tab exists so chat can keep polling in parallel.
   ensureInboxTab({ activate: false }).catch(() => {});
 
-  const result = await sendToTab(tab.id, {
-    type: "FM_START_CAMPAIGN",
-    settings: campaignSettings,
-  });
+  await reportEvent(
+    s.botId,
+    job.id,
+    `${revive ? "Reviving" : "Starting"} campaign keyword=${JSON.stringify(job.keyword)} dry_run=${dry} resumeProfile=${Boolean(resumeProfile)}`
+  );
 
-  console.info("campaign start ack", result);
+  try {
+    const result = await sendToTab(tab.id, {
+      type: "FM_START_CAMPAIGN",
+      settings: campaignSettings,
+    });
+    console.info("campaign start ack", result);
+    await reportEvent(
+      s.botId,
+      job.id,
+      `Content script ack: ${result?.reason || "ok"}`
+    );
+  } catch (e) {
+    await reportEvent(
+      s.botId,
+      job.id,
+      `Failed to start content script: ${e.message || e}`,
+      "error"
+    );
+  }
 }
 
 /**
@@ -248,7 +382,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           },
         });
         await heartbeat("online");
-        await chrome.storage.local.set({ activeJobId: null });
+        await chrome.storage.local.set({
+          activeJobId: null,
+          pendingCampaign: null,
+          campaignLockUntil: 0,
+        });
       } catch (e) {
         console.error(e);
       }
@@ -296,6 +434,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse(data);
       } catch (e) {
         sendResponse({ known: false, error: String(e) });
+      }
+    });
+    return true;
+  }
+  if (msg?.type === "FM_OUTREACH_PERSONALIZE") {
+    settings().then(async (s) => {
+      try {
+        const data = await api(`/api/bots/${s.botId}/outreach/personalize`, {
+          method: "POST",
+          body: msg.profile || {},
+        });
+        sendResponse(data);
+      } catch (e) {
+        sendResponse({ error: String(e) });
       }
     });
     return true;
@@ -359,8 +511,12 @@ async function pollJobs() {
     const shouldHalt =
       job?.status === "cancel_requested" || (activeJobId && !job);
     if (shouldHalt) {
-      await chrome.storage.local.set({ campaignStop: true, activeJobId: null });
-      const outreach = await findTabBy(isOutreachUrl);
+      await chrome.storage.local.set({
+        campaignStop: true,
+        activeJobId: null,
+        pendingCampaign: null,
+      });
+      const outreach = await findTabBy((u) => /\/freelancer/i.test(u));
       if (outreach) {
         try {
           await chrome.tabs.sendMessage(outreach.id, { type: "FM_STOP_CAMPAIGN" });
@@ -372,15 +528,61 @@ async function pollJobs() {
       return;
     }
 
-    if (activeJobId || job?.status === "running") {
-      await heartbeat("busy");
+    // Job running: only revive if no content script is actively campaigning.
+    if (job?.status === "running") {
+      await chrome.storage.local.set({ activeJobId: job.id });
+      const tabs = await chrome.tabs.query({
+        url: ["https://www.freelancermap.com/*", "https://www.freelancermap.de/*"],
+      });
+      let alive = false;
+      for (const t of tabs) {
+        if (isInboxUrl(t.url || "")) continue;
+        if (await pingTabCampaign(t.id)) {
+          alive = true;
+          break;
+        }
+      }
+      if (alive) {
+        await heartbeat("busy");
+        return;
+      }
+      // Content script may be mid step-wait / navigation — trust recent heartbeat.
+      const { campaignAliveAt, pendingCampaign } = await chrome.storage.local.get({
+        campaignAliveAt: 0,
+        pendingCampaign: null,
+      });
+      const aliveAge = Date.now() - Number(campaignAliveAt || 0);
+      if (campaignAliveAt && aliveAge < 90000) {
+        await heartbeat("busy");
+        return;
+      }
+      // Modal already open (&id=) — resume Contact flow, do not re-search.
+      if (pendingCampaign?.phase === "on_profile") {
+        const outreach = tabs.find((t) => !isInboxUrl(t.url || ""));
+        const hasModal =
+          outreach && /[?&]id=\d+/i.test(outreach.url || "");
+        if (hasModal) {
+          await startCampaignInTab(outreach, job, {
+            dry: isDryRunJob(job),
+            skipSearch: true,
+            resumeProfile: true,
+            revive: true,
+          });
+          return;
+        }
+      }
+      await runClaimedJob(job, { revive: true });
       return;
+    }
+
+    if (activeJobId && !job) {
+      await chrome.storage.local.set({ activeJobId: null, pendingCampaign: null });
     }
 
     await heartbeat("online");
     const claimed = await api(`/api/bots/${s.botId}/jobs/claim`, { method: "POST" });
     if (claimed?.job) {
-      await runClaimedJob(claimed.job);
+      await runClaimedJob(claimed.job, { revive: false });
     }
   } catch (e) {
     console.warn("job poll error", e);

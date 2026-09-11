@@ -51,7 +51,13 @@
           <input id="subject" type="text" placeholder="Email subject…" />
         </label>
         <label>Contact form
-          <textarea id="messageBody" rows="8" placeholder="Message sent to every freelancer…"></textarea>
+          <textarea id="messageBody" rows="8" placeholder="Shared contact-form template. DeepSeek rewrites a unique DM per freelancer from this…"></textarea>
+          <p class="muted" style="margin:0.35rem 0 0;font-size:0.85em">
+            This is the shared offer template. DeepSeek writes a <strong>unique</strong> DM per freelancer
+            from it (same project facts, different wording + profile-based reason).
+            Optional tokens: <code>{name}</code>, <code>{detail}</code>. Never write
+            <code>[specific detail from their profile]</code>.
+          </p>
         </label>
         <label class="check"><input id="dryRun" type="checkbox" checked /> Dry run (don’t send)</label>
       </section>

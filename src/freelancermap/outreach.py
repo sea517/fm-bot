@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from playwright.async_api import Locator, Page
 
+from src.ai.outreach_personalize import generate_outreach_detail
 from src.config import (
     DATA_DIR,
     OUTREACH_PROJECT_NAME,
@@ -345,7 +346,14 @@ async def contact_open_profile(
         logger.error("Could not select project for %s (wanted=%r)", name, project)
         return False
 
-    detail = _pick_detail(info.get("title") or "", info.get("location") or "", "")
+    detail = generate_outreach_detail(
+        display_name=name,
+        title=info.get("title") or "",
+        location=info.get("location") or "",
+        skills="",
+        experience="",
+        project_hint=OUTREACH_SUBJECT,
+    )
     body = render_outreach_body(full_name=name, detail=detail)
     if not await _fill_contact_form(page, subject=OUTREACH_SUBJECT, body=body):
         await _save_debug(page, "fill_failed")

@@ -1,5 +1,9 @@
 """Outbound freelancermap.com DM outreach templates."""
 
+from __future__ import annotations
+
+import re
+
 OUTREACH_SUBJECT = (
     "FastAPI/Next.js billing module – remote contract, ~1 month"
 )
@@ -19,11 +23,30 @@ David
 
 def first_name(full_name: str) -> str:
     parts = (full_name or "").strip().split()
-    return parts[0] if parts else "there"
+    if not parts:
+        return "there"
+    first = parts[0]
+    # Avoid "Hello Full," when a job title was misread as the name
+    if re.search(
+        r"\b(senior|lead|engineer|developer|architect|full[\s-]?stack|software)\b",
+        full_name or "",
+        re.I,
+    ) and len(parts) <= 3:
+        return "there"
+    if first.lower() in {"full", "senior", "lead", "principal", "staff", "junior"}:
+        return "there"
+    return first
 
 
 def render_outreach_body(*, full_name: str, detail: str) -> str:
-    return OUTREACH_BODY.format(
+    from src.ai.outreach_personalize import strip_placeholders
+
+    d = (detail or "your technical background").strip()
+    d = strip_placeholders(d, fallback="your technical background")
+    if re.search(r"specific detail from their profile", d, re.I) or "[" in d:
+        d = "your technical background"
+    body = OUTREACH_BODY.format(
         name=first_name(full_name),
-        detail=(detail or "your background").strip(),
+        detail=d,
     )
+    return strip_placeholders(body, fallback=d)

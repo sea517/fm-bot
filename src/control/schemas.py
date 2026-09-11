@@ -79,6 +79,36 @@ class ChatTurnBody(BaseModel):
         return v or None
 
 
+class OutreachPersonalizeBody(BaseModel):
+    """Extension: personalize outreach DM from scraped profile facts."""
+
+    display_name: str | None = None
+    title: str | None = None
+    location: str | None = None
+    skills: str | None = None
+    experience: str | None = None
+    subject: str | None = None
+    message_body: str = Field(default="", max_length=8000)
+    project_hint: str | None = None
+
+    @field_validator(
+        "display_name",
+        "title",
+        "location",
+        "skills",
+        "experience",
+        "subject",
+        "message_body",
+        "project_hint",
+    )
+    @classmethod
+    def strip_fields(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+
 class ApplicantUpsertBody(BaseModel):
     conversation_id: str | None = None
     profile_key: str | None = None

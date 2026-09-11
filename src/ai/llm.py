@@ -97,7 +97,12 @@ def active_model() -> str:
     return OPENROUTER_MODEL if active_ai_provider() == "openrouter" else GEMINI_MODEL
 
 
-def _generate_openrouter(system: str, user: str, max_tokens: int = MAX_TOKENS) -> str:
+def _generate_openrouter(
+    system: str,
+    user: str,
+    max_tokens: int = MAX_TOKENS,
+    temperature: float = 0.35,
+) -> str:
     if not OPENROUTER_API_KEY:
         raise LLMError("OPENROUTER_API_KEY is required")
 
@@ -119,7 +124,7 @@ def _generate_openrouter(system: str, user: str, max_tokens: int = MAX_TOKENS) -
                 {"role": "user", "content": user},
             ],
             max_tokens=max_tokens,
-            temperature=0.35,
+            temperature=temperature,
             extra_body={
                 "reasoning": {"effort": "low", "exclude": True},
                 "include_reasoning": False,
@@ -139,7 +144,7 @@ def _generate_openrouter(system: str, user: str, max_tokens: int = MAX_TOKENS) -
     return text
 
 
-def _generate_gemini(system: str, user: str) -> str:
+def _generate_gemini(system: str, user: str, temperature: float = 0.35) -> str:
     if not GEMINI_API_KEY:
         raise LLMError("GEMINI_API_KEY is required")
 
@@ -150,7 +155,10 @@ def _generate_gemini(system: str, user: str) -> str:
     response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=user,
-        config=types.GenerateContentConfig(system_instruction=system),
+        config=types.GenerateContentConfig(
+            system_instruction=system,
+            temperature=temperature,
+        ),
     )
     text = (response.text or "").strip()
     if not text:
@@ -158,15 +166,23 @@ def _generate_gemini(system: str, user: str) -> str:
     return text
 
 
-def generate(system: str, user: str, max_tokens: int | None = None) -> str:
+def generate(
+    system: str,
+    user: str,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+) -> str:
     provider = active_ai_provider()
     last_error: Exception | None = None
     tokens = max_tokens if max_tokens is not None else MAX_TOKENS
+    temp = 0.35 if temperature is None else float(temperature)
     for attempt in (1, 2, 3):
         try:
             if provider == "openrouter":
-                return _generate_openrouter(system, user, max_tokens=tokens)
-            return _generate_gemini(system, user)
+                return _generate_openrouter(
+                    system, user, max_tokens=tokens, temperature=temp
+                )
+            return _generate_gemini(system, user, temperature=temp)
         except LLMError as e:
             last_error = e
             logger.warning("AI generate attempt %d failed: %s", attempt, e)

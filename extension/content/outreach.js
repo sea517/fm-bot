@@ -97,65 +97,102 @@
     return sec * 1000;
   }
 
-  async function runSearch(keyword) {
-    const kw = (keyword || "").trim();
-    if (!kw) throw new Error("empty keyword");
+  /** Random pause between outreach UI steps (3–10 seconds). */
+  function stepDelayMs() {
+    return (3 + Math.floor(Math.random() * 8)) * 1000;
+  }
 
-    // Prefer staying on /freelancer search (DM outreach only).
-    if (!/\/freelancer/i.test(location.pathname + location.href) || /\/app\/pobox/i.test(location.href)) {
-      location.href = "https://www.freelancermap.com/freelancer";
-      await sleep(2500);
+  async function pauseStep(label) {
+    await touchCampaignAlive();
+    const ms = stepDelayMs();
+    await emitLog(`Step wait ${Math.round(ms / 1000)}s${label ? ` (${label})` : ""}…`);
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (await shouldStop()) return false;
+      if (Date.now() % 5000 < 600) await touchCampaignAlive();
+      await sleep(Math.min(500, end - Date.now()));
     }
+    await touchCampaignAlive();
+    return true;
+  }
 
-    const input =
-      firstVisible([
-        "input[placeholder*='Keyword' i]",
-        "input[name*='keyword' i]",
-        "input[id*='keyword' i]",
-        "input[placeholder*='Search' i]",
-        "input[type='search']",
-        "aside input[type='text']",
-        "form input[type='text']",
-      ]) ||
-      qsa("input[type='text']").find(
-        (el) =>
-          visible(el) &&
-          /keyword|search|skill/i.test(
-            `${el.placeholder} ${el.name} ${el.id} ${el.getAttribute("aria-label") || ""}`
-          )
-      );
-
-    if (!input) {
-      await emitLog("Could not find keyword search input.");
+  async function clickResetAll() {
+    const btn = qsa("a, button, [role='button'], span").find((el) => {
+      if (!visible(el)) return false;
+      const t = (el.textContent || "").trim().toLowerCase();
+      return t === "reset all" || t === "alle zurücksetzen";
+    });
+    if (!btn) {
+      await emitLog("No “Reset all” control found — continuing.");
       return false;
     }
+    btn.click();
+    await emitLog("Clicked “Reset all”.");
+    await sleep(1200);
+    return true;
+  }
 
-    input.focus();
-    setNativeValue(input, kw);
-    await sleep(300);
-
-    const findBtn = qsa("button, [role='button'], a").find((el) => {
-      const t = (el.textContent || "").trim().toLowerCase();
-      return (
-        visible(el) &&
-        (t === "find freelancers" ||
-          t === "freelancer finden" ||
-          t === "search" ||
-          t === "suchen")
-      );
+  /** Remove skill chips like "JavaScript" (keep Worldwide if present). */
+  async function clearSkillChips() {
+    const removable = qsa("button, a, span, [role='button']").filter((el) => {
+      if (!visible(el)) return false;
+      const t = (el.textContent || "").trim();
+      if (!t || t.length > 80) return false;
+      const low = t.toLowerCase();
+      if (low === "worldwide" || low === "reset all" || low === "recently updated") {
+        return false;
+      }
+      // Chip with an X / close control
+      const hasX =
+        /×|x$/i.test(t) ||
+        el.querySelector("svg, [class*='close'], [class*='Close'], [aria-label*='remove' i]");
+      if (!hasX && !/exclude freelancers/i.test(t)) return false;
+      return true;
     });
-
-    if (findBtn) {
-      findBtn.click();
-    } else {
-      input.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true })
-      );
-      input.form?.requestSubmit?.();
+    let removed = 0;
+    for (const chip of removable.slice(0, 12)) {
+      const close =
+        chip.querySelector(
+          "button, [aria-label*='remove' i], [aria-label*='close' i], svg, [class*='close']"
+        ) || chip;
+      try {
+        close.click();
+        removed += 1;
+        await sleep(350);
+      } catch (_e) {
+        /* ignore */
+      }
     }
+    if (removed) await emitLog(`Cleared ${removed} filter chip(s).`);
+    return removed;
+  }
 
-    await emitLog(`Searching for “${kw}”…`);
-    // Persist so a full-page navigation can resume and still report the count.
+  function searchUrlForKeyword(kw) {
+    const u = new URL("https://www.freelancermap.com/freelancer");
+    u.searchParams.set("query", kw);
+    return u.toString();
+  }
+
+  function activeFilterLabels() {
+    return qsa("button, a, span, [class*='chip'], [class*='Chip'], [class*='tag'], [class*='Tag']")
+      .filter(visible)
+      .map((el) => (el.textContent || "").trim().replace(/\s*×\s*$/, "").trim())
+      .filter((t) => t.length > 1 && t.length < 80);
+  }
+
+  function keywordAppearsInFilters(kw) {
+    const parts = String(kw)
+      .toLowerCase()
+      .split(/[\s,/|]+/)
+      .filter((p) => p.length > 2);
+    const labels = activeFilterLabels().map((t) => t.toLowerCase());
+    const joined = labels.join(" | ");
+    if (joined.includes(String(kw).toLowerCase())) return true;
+    // At least one meaningful token from the keyword should appear (e.g. FastAPI)
+    return parts.some((p) => labels.some((l) => l.includes(p)));
+  }
+
+  async function markAwaitResults() {
     try {
       const { pendingCampaign } = await chrome.storage.local.get({
         pendingCampaign: null,
@@ -172,140 +209,652 @@
     } catch (_e) {
       /* ignore */
     }
+  }
+
+  /**
+   * Apply keyword via URL ?query=… (reliable). UI autocomplete often turns
+   * "FastAPI Next.js" into a wrong skill chip like "JavaScript".
+   */
+  async function ensureSearchApplied(kw) {
+    const target = searchUrlForKeyword(kw);
+    const currentQ = (new URLSearchParams(location.search).get("query") || "").trim();
+    if (
+      !/\/freelancer/i.test(location.pathname) ||
+      currentQ.toLowerCase() !== kw.toLowerCase()
+    ) {
+      await emitLog(`Navigating to “${kw}” search…`);
+      await markAwaitResults();
+      location.href = target;
+      await sleep(3500);
+      return true;
+    }
+
+    // Query already correct — do not clear chips or reload (that restarts search mid-DM).
+    const labels = activeFilterLabels().map((t) => t.toLowerCase());
+    const hasWrongSkill =
+      labels.some((l) => l === "javascript" || l === "java") &&
+      !keywordAppearsInFilters(kw);
+    if (hasWrongSkill) {
+      await emitLog("Wrong skill chip detected — reloading clean query URL…");
+      await markAwaitResults();
+      location.href = target;
+      await sleep(3500);
+    }
+    return true;
+  }
+
+  async function runSearch(keyword) {
+    const kw = (keyword || "").trim();
+    if (!kw) throw new Error("empty keyword");
+
+    if (/\/app\/pobox/i.test(location.href)) {
+      await markAwaitResults();
+      location.href = searchUrlForKeyword(kw);
+      await sleep(3000);
+      return true;
+    }
+
+    await clickResetAll();
+    await clearSkillChips();
+    await sleep(500);
+
+    await ensureSearchApplied(kw);
+
+    const q = (new URLSearchParams(location.search).get("query") || "").trim();
+    if (q.toLowerCase() !== kw.toLowerCase()) {
+      await emitLog(`Re-applying query: “${kw}”`);
+      await markAwaitResults();
+      location.href = searchUrlForKeyword(kw);
+      await sleep(3500);
+    }
+
+    if (
+      !keywordAppearsInFilters(kw) &&
+      !(new URLSearchParams(location.search).get("query") || "")
+        .toLowerCase()
+        .includes(kw.split(/\s+/)[0].toLowerCase())
+    ) {
+      await emitLog("Typing keyword without autocomplete as fallback…");
+      const ok = await typeKeywordWithoutAutocomplete(kw);
+      if (!ok) return false;
+    }
+
+    await emitLog(
+      `Search ready for “${kw}”. URL query=${new URLSearchParams(location.search).get("query") || "(none)"}; filters: ${activeFilterLabels().slice(0, 8).join(", ") || "(none)"}`
+    );
+    return true;
+  }
+
+  async function typeKeywordWithoutAutocomplete(kw) {
+    const input =
+      firstVisible([
+        "input[placeholder*='Search by skills' i]",
+        "input[placeholder*='Keyword' i]",
+        "input[placeholder*='Search' i]",
+        "input[type='search']",
+        "input[name*='keyword' i]",
+        "input[name*='query' i]",
+      ]) ||
+      qsa("input[type='text'], input[type='search']").find(
+        (el) =>
+          visible(el) &&
+          /keyword|search|skill|query/i.test(
+            `${el.placeholder} ${el.name} ${el.id} ${el.getAttribute("aria-label") || ""}`
+          )
+      );
+
+    if (!input) {
+      await emitLog("Could not find keyword search input.");
+      return false;
+    }
+
+    input.focus();
+    setNativeValue(input, "");
+    await sleep(200);
+    // Commit free-text with Enter; do NOT click autocomplete suggestions.
+    setNativeValue(input, kw);
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true })
+    );
+    await sleep(200);
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        code: "Enter",
+        keyCode: 13,
+        which: 13,
+        bubbles: true,
+      })
+    );
+    await sleep(600);
+
+    const findBtn = qsa("button, [role='button'], a").find((el) => {
+      const t = (el.textContent || "").trim().toLowerCase();
+      return (
+        visible(el) &&
+        (t === "find freelancers" || t === "freelancer finden")
+      );
+    });
+    if (findBtn) findBtn.click();
     await sleep(2500);
     return true;
   }
 
-  function parseFreelancerCount(text) {
-    if (!text) return null;
-    const patterns = [
-      /([\d]{1,3}(?:[.,\u00a0\s]\d{3})+|\d+)\s*freelancers?\b/i,
-      /([\d]{1,3}(?:[.,\u00a0\s]\d{3})+|\d+)\s*freelancer\b/i,
-    ];
-    for (const re of patterns) {
-      const m = String(text).match(re);
-      if (!m) continue;
-      const n = Number.parseInt(m[1].replace(/[.,\u00a0\s]/g, ""), 10);
-      if (Number.isFinite(n) && n >= 0) return n;
+  function parseFreelancerCountToken(raw) {
+    if (!raw) return null;
+    const n = Number.parseInt(String(raw).replace(/[.,\u00a0\s]/g, ""), 10);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  }
+
+  /**
+   * Total from the results heading, e.g. "79,097 freelancers".
+   * Prefer dedicated headings; take the largest match so sidebar crumbs don't win.
+   */
+  function readSearchResultCount() {
+    const re = /([\d]{1,3}(?:[.,\u00a0\s]\d{3})+|\d+)\s*freelancers?\b/gi;
+    const candidates = [];
+
+    for (const el of qsa("h1, h2, h3")) {
+      if (!visible(el)) continue;
+      const t = (el.textContent || "").trim();
+      // Exact-ish heading: "79,097 freelancers"
+      const only = t.match(
+        /^([\d]{1,3}(?:[.,\u00a0\s]\d{3})+|\d+)\s*freelancers?\s*$/i
+      );
+      if (only) {
+        const n = parseFreelancerCountToken(only[1]);
+        if (n != null) candidates.push({ n, score: 100 + Math.min(n, 1e6) / 1e6 });
+      }
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(t))) {
+        const n = parseFreelancerCountToken(m[1]);
+        if (n != null) candidates.push({ n, score: 50 + n / 1e9 });
+      }
+    }
+
+    // Also scan a short window of main content for the big total
+    const main =
+      document.querySelector("main, [role='main']") || document.body;
+    const text = (main?.innerText || "").slice(0, 12000);
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(text))) {
+      const n = parseFreelancerCountToken(m[1]);
+      // Ignore tiny counts that are unlikely to be the results total
+      if (n != null && n >= 10) candidates.push({ n, score: 10 + n / 1e9 });
+    }
+
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => b.score - a.score || b.n - a.n);
+    return candidates[0].n;
+  }
+
+  async function waitForSearchResults(timeoutMs = 45000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const total = readSearchResultCount();
+      const cards = collectTitleLinks();
+      // Wait until real card titles exist (skeletons have no data-id title).
+      if (cards.length > 0) {
+        return { total: total != null ? total : null, cards };
+      }
+      await sleep(800);
+    }
+    return {
+      total: readSearchResultCount(),
+      cards: collectTitleLinks(),
+    };
+  }
+
+  function elText(el) {
+    return (el.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  function isPageChromeText(t) {
+    const s = (t || "").trim().toLowerCase();
+    return (
+      s === "find freelancers" ||
+      s === "find the ideal freelancer" ||
+      s === "freelancer finden" ||
+      s.startsWith("find the ideal") ||
+      s === "reset all" ||
+      s === "saved searches" ||
+      s === "add to watchlist" ||
+      s === "show contact details" ||
+      /^€?\d/.test(s)
+    );
+  }
+
+  function isSkillOrFilterText(t) {
+    const s = (t || "").trim();
+    if (!s) return true;
+    if (isPageChromeText(s)) return true;
+    if (/\(programming language\)|\(software\)|\(framework\)|\(library\)|\(tool\)/i.test(s)) {
+      return true;
+    }
+    if (/^(python|java|javascript|typescript|react|angular|vue|node\.?js|sql|html|css|php|ruby|go|rust|c\+\+|c#)$/i.test(s)) {
+      return true;
+    }
+    return false;
+  }
+
+  /** FM card headlines use | or ▪ (U+25AA) between role segments. */
+  function hasTitleSeparator(s) {
+    return /[|■▪▫●•]/.test(s || "");
+  }
+
+  function isJobTitleText(t) {
+    const s = (t || "").trim();
+    if (s.length < 12) return false;
+    if (isSkillOrFilterText(s)) return false;
+    if (isPageChromeText(s)) return false;
+    if (/^(only remote|available|watchlist|contact|add to watchlist)$/i.test(s)) {
+      return false;
+    }
+    if (/^[A-Za-z.\- ]+,\s*[A-Za-z.\- ]+$/.test(s) && s.length < 45 && !hasTitleSeparator(s)) {
+      return false;
+    }
+    if (hasTitleSeparator(s) && s.length >= 16) return true;
+    if (
+      /\b(senior|lead|engineer|developer|architect|consultant|manager|designer|devops|backend|frontend|scientist|analyst|mlops|full[\s-]?stack|software)\b/i.test(
+        s
+      )
+    ) {
+      return true;
+    }
+    if (s.length >= 36 && /\s/.test(s) && !/^find\b/i.test(s)) return true;
+    return false;
+  }
+
+  function isSkillOrFilterLink(a) {
+    if (!a || a.tagName !== "A") return false;
+    const href = (a.getAttribute("href") || "").toLowerCase();
+    const t = elText(a);
+    if (isSkillOrFilterText(t) || isPageChromeText(t)) return true;
+    if (/\/(skill|keyword|tag|technologie|technolog)/i.test(href)) return true;
+    if (/[?&](query|keywords|skills)=/.test(href) && !/[?&]id=\d+/i.test(href) && !hasTitleSeparator(t)) {
+      return true;
+    }
+    // City links like /freelancer/arges
+    if (/data-id=["']freelancer-card-city["']/.test(a.outerHTML || "")) return true;
+    if (a.getAttribute("data-id") === "freelancer-card-city") return true;
+    return false;
+  }
+
+  function profileIdFromEl(el) {
+    if (!el) return null;
+    const scope =
+      el.closest?.(
+        ".freelancer-container, .freelancer-card, article, li, [class*='card'], [class*='Card'], section"
+      ) || el;
+    const hrefs = [
+      el.getAttribute?.("href"),
+      ...qsa("a[href]", scope).map((a) => a.getAttribute("href")),
+    ].filter(Boolean);
+    for (const href of hrefs) {
+      try {
+        const u = new URL(href, location.href);
+        const id = u.searchParams.get("id");
+        if (id && /^\d+$/.test(id)) return id;
+      } catch (_e) {
+        /* ignore */
+      }
+      const m = String(href).match(/[?&]id=(\d+)/i);
+      if (m) return m[1];
+    }
+    for (const node of [scope, el, ...qsa("[data-profile-id], [data-id]", scope)]) {
+      for (const attr of ["data-profile-id", "data-freelancer-id", "data-id"]) {
+        const v = node.getAttribute?.(attr);
+        if (v && /^\d+$/.test(v)) return v;
+      }
     }
     return null;
   }
 
-  /** Total from the results heading, e.g. "79,097 freelancers". */
-  function readSearchResultCount() {
-    const headings = qsa("h1, h2, h3, [class*='result'], [class*='Result'], main, [role='main']");
-    for (const el of headings) {
+  /**
+   * Official FM SERP card titles:
+   * <a role="button" data-id="freelancer-card-title" class="title" href="/profile/...">
+   */
+  function collectTitleEntries() {
+    const out = [];
+    const seen = new Set();
+    const titles = qsa(
+      'a[data-id="freelancer-card-title"], [data-id="freelancer-card-title"]'
+    );
+    for (const el of titles) {
       if (!visible(el)) continue;
-      const n = parseFreelancerCount((el.textContent || "").trim());
-      if (n != null) return n;
+      const text = elText(el);
+      if (!text || isPageChromeText(text)) continue;
+      const card = el.closest(
+        ".freelancer-container, .freelancer-card, .card, article, li"
+      );
+      const profileId = profileIdFromEl(el) || (card ? profileIdFromEl(card) : null);
+      const key = (profileId || el.getAttribute("href") || text.slice(0, 120)).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ el, text, profileId, card: card || null });
     }
-    // Fallback: first match in visible page text (avoid huge scans)
-    const body = (document.body?.innerText || "").slice(0, 8000);
-    return parseFreelancerCount(body);
+    if (out.length) return out;
+
+    // Fallback if FM renames data-id: .freelancer-container .title
+    for (const el of qsa(".freelancer-container a.title, .freelancer-card a.title, a.title")) {
+      if (!visible(el)) continue;
+      if (el.getAttribute("data-id") === "freelancer-card-city") continue;
+      const text = elText(el);
+      if (!isJobTitleText(text)) continue;
+      if (isSkillOrFilterLink(el)) continue;
+      const card = el.closest(".freelancer-container, .freelancer-card, .card");
+      const profileId = profileIdFromEl(el);
+      const key = (profileId || el.getAttribute("href") || text.slice(0, 120)).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ el, text, profileId, card: card || null });
+    }
+    return out;
   }
 
-  async function waitForSearchResults(timeoutMs = 20000) {
-    const start = Date.now();
-    let lastCount = null;
-    while (Date.now() - start < timeoutMs) {
-      const total = readSearchResultCount();
-      const cards = collectProfileCards();
-      if (total != null) {
-        // Stable for one tick, or we already have cards
-        if (lastCount === total || cards.length > 0) {
-          return { total, cards };
-        }
-        lastCount = total;
-      } else if (cards.length > 0 && Date.now() - start > 4000) {
-        return { total: cards.length, cards };
-      }
-      await sleep(800);
-    }
-    const cards = collectProfileCards();
-    const total = readSearchResultCount();
-    return {
-      total: total != null ? total : cards.length,
-      cards,
-    };
+  function collectTitleLinks() {
+    return collectTitleEntries().map((e) => e.el);
   }
 
   function collectProfileCards() {
-    const anchors = qsa("a[href*='/freelancer/']").filter((a) => {
-      if (!visible(a)) return false;
-      const href = a.getAttribute("href") || "";
-      if (/\/freelancer\/?(\?|$)/i.test(href)) return false; // search root
-      if (/\/freelancer\/(search|list)/i.test(href)) return false;
-      return /\/freelancer\/[^/?#]+/i.test(href);
-    });
+    return collectTitleLinks();
+  }
 
-    // Deduplicate by href
-    const seen = new Set();
-    const cards = [];
-    for (const a of anchors) {
-      const abs = new URL(a.getAttribute("href"), location.href).pathname;
-      if (seen.has(abs)) continue;
-      seen.add(abs);
-      cards.push(a);
+  /** Visible profile modal / panel root when present. */
+  function profileModalRoot() {
+    return (
+      firstVisible(["[role='dialog']", ".modal", "[class*='Modal']"]) || null
+    );
+  }
+
+  function isContactLabel(text) {
+    const t = (text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    if (!t) return false;
+    if (t === "contact" || t === "kontaktieren" || t === "kontakt") return true;
+    // Short labels only — avoid "show contact details" / long sentences.
+    if (t.length <= 22 && /^(contact|kontaktieren|kontakt)\b/.test(t)) {
+      return true;
     }
-    return cards;
+    return false;
+  }
+
+  /** Prefer Contact/Kontaktieren inside the open modal. */
+  function findContactButton(root = null) {
+    const scope = root || profileModalRoot() || document;
+    const nodes = qsa(
+      "button, a, [role='button'], [data-id*='contact'], [data-testid*='contact']",
+      scope
+    );
+    const matches = nodes.filter((el) => {
+      if (!visible(el)) return false;
+      const label = `${el.getAttribute("aria-label") || ""} ${
+        el.getAttribute("title") || ""
+      }`;
+      return isContactLabel(elText(el)) || isContactLabel(label);
+    });
+    // Prefer controls inside a dialog when searching the whole document.
+    if (!root && matches.length > 1) {
+      const inModal = matches.find((el) =>
+        el.closest?.("[role='dialog'], .modal, [class*='Modal']")
+      );
+      if (inModal) return inModal;
+    }
+    return matches[0] || null;
+  }
+
+  /** Modal open: URL has &id=… (FM pattern) or dialog with Contact. */
+  function profilePanelOpen() {
+    if (/[?&]id=\d+/i.test(location.search) && findContactButton()) return true;
+    if (/[?&]id=\d+/i.test(location.search) && profileModalRoot()) return true;
+    const root = profileModalRoot();
+    if (!root) return false;
+    return Boolean(findContactButton(root));
+  }
+
+  async function waitForContactButton(timeoutMs = 12000) {
+    const end = Date.now() + timeoutMs;
+    while (Date.now() < end) {
+      const btn = findContactButton();
+      if (btn) return btn;
+      await sleep(300);
+    }
+    return null;
+  }
+
+  async function openCardProfile(entry, keyword) {
+    const before = location.href;
+    // Prefer clicking the official card title — FM opens the SERP modal.
+    entry.el.scrollIntoView({ block: "center", behavior: "instant" });
+    entry.el.click();
+    for (let i = 0; i < 25; i++) {
+      await sleep(400);
+      if (profilePanelOpen() || findContactButton()) break;
+    }
+    if (await waitForContactButton(8000)) return true;
+    if (profilePanelOpen()) return true;
+
+    // Fallback: navigate with &id= when we know the numeric id
+    if (entry.profileId) {
+      const u = new URL(location.href);
+      if (keyword) u.searchParams.set("query", keyword);
+      u.searchParams.set("id", String(entry.profileId));
+      location.assign(u.toString());
+      await sleep(2500);
+      if (await waitForContactButton(10000)) return true;
+      if (profilePanelOpen()) return true;
+    }
+    if (location.href !== before && !/[?&]id=\d+/i.test(location.search)) {
+      history.back();
+      await sleep(1500);
+    }
+    return Boolean(await waitForContactButton(4000)) || profilePanelOpen();
+  }
+
+  async function touchCampaignAlive() {
+    try {
+      await chrome.storage.local.set({ campaignAliveAt: Date.now() });
+    } catch (_e) {
+      /* ignore */
+    }
+  }
+
+  function looksLikePersonName(text) {
+    const s = (text || "").replace(/\s+/g, " ").trim();
+    if (!s || s.length > 60) return false;
+    if (hasTitleSeparator(s)) return false;
+    if (
+      /\b(senior|lead|engineer|developer|architect|consultant|manager|designer|devops|backend|frontend|full[\s-]?stack|scientist|analyst|software|python|java|react|fastapi|django|next\.?js)\b/i.test(
+        s
+      )
+    ) {
+      return false;
+    }
+    if (/\d|[/\\|@]/.test(s)) return false;
+    const parts = s.split(/\s+/);
+    if (parts.length < 2 || parts.length > 4) return false;
+    const caps = parts.filter((p) => /^[A-ZÀ-ÖØ-Ý]/.test(p)).length;
+    return caps >= parts.length - 1;
+  }
+
+  function looksLikeJobTitle(text) {
+    const s = (text || "").trim();
+    if (!s || s.length < 8 || looksLikePersonName(s)) return false;
+    if (hasTitleSeparator(s) && s.length >= 12) return true;
+    return /\b(senior|lead|engineer|developer|architect|consultant|manager|designer|devops|backend|frontend|full[\s-]?stack|scientist|analyst|software|python|java|react|fastapi|django|next\.?js|node|cloud|data|mobile)\b/i.test(
+      s
+    );
+  }
+
+  function looksLikeLocation(text) {
+    const s = (text || "").trim();
+    if (!s || looksLikeJobTitle(s) || looksLikePersonName(s)) return false;
+    if (
+      /\b(pakistan|india|germany|hungary|spain|france|italy|remote|united|uk|cyprus|poland|lahore|berlin|london|munich|karachi|islamabad)\b/i.test(
+        s
+      )
+    ) {
+      return true;
+    }
+    return /^[A-Za-z.\- ]+,\s*[A-Za-z.\- ]+$/.test(s) && s.length < 50;
   }
 
   function readOpenProfile() {
-    const root =
-      firstVisible(["[role='dialog']", ".modal", "[class*='Modal']"]) ||
-      document.body;
-    let name = "";
-    for (const sel of ["h1", "h2", "[data-testid='freelancer-name']"]) {
-      const el = root.querySelector(sel);
-      if (el && el.textContent.trim().length > 1) {
-        name = el.textContent.trim().split("\n")[0].trim();
-        break;
-      }
-    }
-
+    const root = profileModalRoot() || document.body;
     const lines = (root.innerText || "")
       .split("\n")
       .map((l) => l.trim())
       .filter(Boolean);
 
-    let title = "";
-    let location = "";
-    if (name) {
-      const first = name.split(/\s+/)[0].toLowerCase();
-      const last = name.split(/\s+/).slice(-1)[0].toLowerCase();
-      const idx = lines.findIndex(
-        (l) => l.toLowerCase().includes(first) && l.toLowerCase().includes(last)
-      );
-      const after = idx >= 0 ? lines.slice(idx + 1, idx + 10) : lines.slice(0, 10);
-      for (const cand of after) {
-        const low = cand.toLowerCase();
-        if (
-          [
-            "verified",
-            "premium member",
-            "contact",
-            "show contact details",
-            "watchlist",
-          ].includes(low)
-        )
-          continue;
-        if (/€\s*\d|\/\s*h|%\s*available|updated/i.test(cand)) continue;
-        if (!title && cand.length > 8) {
-          title = cand;
-          continue;
-        }
-        if (
-          title &&
-          !location &&
-          (/,/.test(cand) ||
-            /germany|hungary|spain|india|france|italy|remote|united|uk|cyprus|poland/i.test(
-              cand
-            ))
-        ) {
-          location = cand;
+    // Prefer a real person name over a job-title heading.
+    let name = "";
+    for (const sel of [
+      "[data-testid='freelancer-name']",
+      "[data-id*='name']",
+      "h1",
+      "h2",
+    ]) {
+      for (const el of qsa(sel, root)) {
+        const t = elText(el).split("\n")[0].trim();
+        if (!t || t.length < 2) continue;
+        if (looksLikeJobTitle(t) || looksLikeLocation(t)) continue;
+        if (looksLikePersonName(t) || /^[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ'’-]+(\s+[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ'’-]+){1,3}$/.test(t)) {
+          name = t;
           break;
         }
       }
+      if (name) break;
+    }
+    if (!name) {
+      for (const line of lines.slice(0, 12)) {
+        if (looksLikePersonName(line)) {
+          name = line;
+          break;
+        }
+      }
+    }
+    // Last resort: first heading that isn't clearly a long job title
+    if (!name) {
+      for (const sel of ["h1", "h2"]) {
+        const el = root.querySelector(sel);
+        if (!el) continue;
+        const t = elText(el).split("\n")[0].trim();
+        if (t && !looksLikeLocation(t) && t.length < 50) {
+          name = t;
+          break;
+        }
+      }
+    }
+
+    let title = "";
+    let location = "";
+    const after = [];
+    if (name) {
+      const idx = lines.findIndex((l) => l.toLowerCase() === name.toLowerCase());
+      after.push(...(idx >= 0 ? lines.slice(idx + 1, idx + 16) : lines.slice(0, 16)));
+    } else {
+      after.push(...lines.slice(0, 16));
+    }
+    // Also consider heading text that looks like a role
+    for (const sel of ["h1", "h2", "h3", "[class*='title']", "[class*='headline']"]) {
+      for (const el of qsa(sel, root)) {
+        const t = elText(el).split("\n")[0].trim();
+        if (t && looksLikeJobTitle(t) && t.toLowerCase() !== name.toLowerCase()) {
+          after.unshift(t);
+        }
+      }
+    }
+
+    for (const cand of after) {
+      const low = cand.toLowerCase();
+      if (
+        [
+          "verified",
+          "premium member",
+          "contact",
+          "show contact details",
+          "watchlist",
+        ].includes(low)
+      ) {
+        continue;
+      }
+      if (/€\s*\d|\/\s*h|%\s*available|updated/i.test(cand)) continue;
+      if (name && cand.toLowerCase() === name.toLowerCase()) continue;
+      if (looksLikePersonName(cand)) continue;
+      if (!title && looksLikeJobTitle(cand)) {
+        title = cand;
+        continue;
+      }
+      if (!title && cand.length > 12 && !looksLikeLocation(cand)) {
+        // Accept long headlines with separators even if role hint is weak
+        if (hasTitleSeparator(cand)) {
+          title = cand;
+          continue;
+        }
+      }
+      if (title && !location && looksLikeLocation(cand)) {
+        location = cand;
+        break;
+      }
+    }
+
+    // Skills / tags from the open profile modal
+    const skillBits = [];
+    const skillNodes = qsa(
+      "[class*='skill'], [class*='Skill'], [class*='tag'], [class*='Tag'], [data-id*='skill'], a[href*='skill']",
+      root
+    );
+    for (const el of skillNodes) {
+      const t = elText(el);
+      if (!t || t.length < 2 || t.length > 48) continue;
+      if (isPageChromeText(t) || /contact|watchlist|verified|premium/i.test(t)) continue;
+      if (looksLikePersonName(t) || looksLikeLocation(t)) continue;
+      if (!skillBits.includes(t)) skillBits.push(t);
+      if (skillBits.length >= 16) break;
+    }
+    // Also pull tech tokens from lines if DOM tags are empty
+    if (!skillBits.length) {
+      const techRe =
+        /\b(FastAPI|Django|Flask|Next\.?js|React|Angular|Vue|Node\.?js|TypeScript|Python|PostgreSQL|Stripe|AWS|Docker|Kubernetes|GraphQL|MongoDB|Redis|Spring|Laravel|Rails|Java|Go|Rust)\b/gi;
+      for (const line of lines) {
+        let m;
+        const re = new RegExp(techRe.source, "gi");
+        while ((m = re.exec(line))) {
+          if (!skillBits.includes(m[0])) skillBits.push(m[0]);
+          if (skillBits.length >= 8) break;
+        }
+        if (skillBits.length >= 8) break;
+      }
+    }
+    const skills = skillBits.join(", ");
+
+    const skipLine = (l) => {
+      const low = (l || "").toLowerCase();
+      return (
+        !l ||
+        low === "contact" ||
+        low === "watchlist" ||
+        low === "verified" ||
+        low === "premium member" ||
+        low === "show contact details" ||
+        /^€\s*\d/.test(l) ||
+        /%\s*available|updated\s+\d/i.test(l)
+      );
+    };
+    const experienceLines = lines.filter((l) => !skipLine(l)).slice(0, 40);
+    let experience = experienceLines.join("\n").slice(0, 1500);
+    const aboutIdx = lines.findIndex((l) =>
+      /^(about|experience|profile|skills|overview|projects|zusammenfassung|erfahrung)\b/i.test(
+        l
+      )
+    );
+    if (aboutIdx >= 0) {
+      experience = lines
+        .slice(aboutIdx, aboutIdx + 30)
+        .filter((l) => !skipLine(l))
+        .join("\n")
+        .slice(0, 1500);
     }
 
     const href = window.location.href;
@@ -314,50 +863,95 @@
       name,
       title,
       location,
+      skills,
+      experience,
       profileKey: keyMatch?.[1] || name || href,
     };
   }
 
   async function clickContact() {
-    const candidates = qsa("button, a, [role='button']").filter((el) => {
-      const t = (el.textContent || "").trim().toLowerCase();
-      return t === "contact" || t === "kontaktieren" || t === "kontakt";
-    });
-    const target = candidates.find(visible) || null;
+    // Always target the Contact button on the displayed profile modal.
+    let target = findContactButton(profileModalRoot()) || findContactButton();
+    if (!target) {
+      target = await waitForContactButton(10000);
+    }
     if (!target) return false;
+    target.scrollIntoView({ block: "center", behavior: "instant" });
+    await sleep(200);
     target.click();
-    await sleep(1200);
     return true;
   }
 
   async function fillForm({ subject, body }) {
-    const subjectInput = firstVisible([
-      "input[placeholder*='Subject' i]",
-      "input[name*='subject' i]",
-      "form input[type='text']",
-    ]);
-    const textarea = firstVisible([
-      "textarea",
-      "form textarea",
-      "[role='dialog'] textarea",
-    ]);
+    const root =
+      firstVisible(["[role='dialog']", ".modal", "[class*='Modal']"]) || document;
+    const subjectInput = firstVisible(
+      [
+        "input[placeholder*='Subject' i]",
+        "input[name*='subject' i]",
+        "input[type='text']",
+      ],
+      root
+    );
+    const textarea = firstVisible(["textarea"], root);
     if (!subjectInput || !textarea) return false;
     setNativeValue(subjectInput, subject);
+    await sleep(400);
     setNativeValue(textarea, body);
     return true;
   }
 
   async function clickSend() {
-    const btn = qsa("button, [role='button']").find((el) => {
+    const root =
+      firstVisible(["[role='dialog']", ".modal", "[class*='Modal']"]) || document;
+    const btn = qsa("button, [role='button'], [type='submit']", root).find((el) => {
       const t = (el.textContent || "").trim().toLowerCase();
       return (
         visible(el) &&
         (t === "send message" || t === "nachricht senden" || t === "send")
       );
     });
-    if (!btn) return false;
+    if (!btn) {
+      await emitLog("Send message button not found.", "warn");
+      return false;
+    }
+    // Still try click even if aria-disabled — FM may allow send without project
     btn.click();
-    await sleep(1200);
+    await sleep(1500);
+    return true;
+  }
+
+  function isDryRun(settings) {
+    return settings?.dryRun === true || settings?.dryRun === "true" || settings?.dry_run === true;
+  }
+
+  /** Bottom-right next profile control (→) after a DM. */
+  async function clickNextProfile() {
+    const candidates = qsa("button, a, [role='button'], [aria-label]").filter(
+      (el) => {
+        if (!visible(el)) return false;
+        const label = `${el.getAttribute("aria-label") || ""} ${el.getAttribute("title") || ""}`.toLowerCase();
+        const t = (el.textContent || "").trim();
+        if (/next|weiter|following|nächste/i.test(label)) return true;
+        if (t === "→" || t === "➜" || t === "›" || t === ">" || t === "»") return true;
+        if (/^→|➜|›$/.test(t)) return true;
+        if (/next/i.test(label)) return true;
+        return false;
+      }
+    );
+    let best = null;
+    let bestScore = -1;
+    for (const el of candidates) {
+      const r = el.getBoundingClientRect();
+      const score = r.left + r.top * 0.25;
+      if (score > bestScore) {
+        bestScore = score;
+        best = el;
+      }
+    }
+    if (!best && candidates[0]) best = candidates[0];
+    if (!best) return false;
+    best.click();
     return true;
   }
 
@@ -378,8 +972,13 @@
     await sleep(600);
   }
 
-  async function runOne(settings) {
+  /**
+   * Contact → fill → send (or dry-run). Project select is skipped — FM allows send without it.
+   * Each UI action is separated by a random 3–10s pause.
+   */
+  async function runContactAndSend(settings) {
     const T = globalThis.FMOutreach;
+    const dry = isDryRun(settings);
     const info = readOpenProfile();
     if (!info.name) {
       return { ok: false, reason: "no_profile_name", info };
@@ -392,29 +991,79 @@
       return { ok: false, reason: "already_contacted", info };
     }
 
-    let hasForm = Boolean(firstVisible(["textarea"]));
-    if (!hasForm) {
-      const clicked = await clickContact();
-      if (!clicked) return { ok: false, reason: "contact_button_missing", info };
-      await sleep(800);
-      hasForm = Boolean(firstVisible(["textarea"]));
-      if (!hasForm) return { ok: false, reason: "contact_form_missing", info };
+    if (!(await pauseStep("before Contact"))) {
+      return { ok: false, reason: "stopped", info };
+    }
+    await emitLog(`Clicking Contact on modal for ${info.name}…`);
+    const clicked = await clickContact();
+    if (!clicked) return { ok: false, reason: "contact_button_missing", info };
+    await emitLog("Contact clicked — waiting for form…");
+
+    // Wait for form to appear
+    for (let i = 0; i < 20; i++) {
+      if (firstVisible(["textarea", "[role='dialog'] textarea"])) break;
+      await sleep(400);
+    }
+    if (!firstVisible(["textarea", "[role='dialog'] textarea"])) {
+      return { ok: false, reason: "contact_form_missing", info };
     }
 
-    const detail = T.pickDetail(info.title, info.location);
-    const subject = T.renderSubject(settings.subject, info.name);
-    const body = T.renderBody(settings.messageBody || settings.body, info.name, detail);
+    if (!(await pauseStep("before fill form"))) {
+      return { ok: false, reason: "stopped", info };
+    }
+
+    // DeepSeek rewrites a unique DM from the shared contact-form + profile.
+    await emitLog(
+      `Personalizing unique DM for ${info.name}` +
+        (info.title ? ` · ${info.title.slice(0, 60)}` : "") +
+        "…"
+    );
+    let personalized = await T.personalizeOutreach(settings, info);
+    if (
+      /\[\s*[^\]]+\s*\]/.test(personalized.body || "") ||
+      /specific detail from their profile/i.test(personalized.body || "")
+    ) {
+      await emitLog("Body still had placeholders — using local profile detail.", "warn");
+      const safeDetail = T.pickDetail(
+        info.title,
+        info.location,
+        info.skills,
+        info.name,
+        info.experience
+      );
+      personalized = {
+        detail: safeDetail,
+        subject: T.renderSubject(settings.subject, info.name),
+        body: T.renderBody(
+          settings.messageBody || settings.body,
+          info.name,
+          safeDetail
+        ),
+        source: "local_sanitized",
+      };
+    }
+    const { detail, subject, body } = personalized;
+    await emitLog(
+      `Unique DM ready (${personalized.source}, ${String(body || "").length} chars)` +
+        (detail ? ` · hook: ${String(detail).slice(0, 100)}` : "")
+    );
+
     const filled = await fillForm({ subject, body });
     if (!filled) return { ok: false, reason: "fill_failed", info };
 
-    if (settings.dryRun) {
+    if (dry) {
+      await emitLog(`Dry-run filled form for ${info.name} (not sending)`);
       return { ok: true, reason: "dry_run", info, subject, detail };
     }
 
+    await emitLog(`Sending live DM to ${info.name}…`);
+    if (!(await pauseStep("before Send message"))) {
+      return { ok: false, reason: "stopped", info };
+    }
     const sent = await clickSend();
     if (!sent) return { ok: false, reason: "send_failed", info };
+    await emitLog(`Send clicked for ${info.name}`);
 
-    // Count as contacted even if Supabase ledger write fails.
     try {
       await T.markContacted(settings, {
         name: info.name,
@@ -427,20 +1076,68 @@
     return { ok: true, reason: "sent", info, subject, detail };
   }
 
+  async function runOne(settings) {
+    return runContactAndSend(settings);
+  }
+
+  async function waitBetweenDms(settings) {
+    const waitMs = randomIntervalMs(
+      settings.minIntervalSec,
+      settings.maxIntervalSec
+    );
+    await emitLog(
+      `Waiting ${Math.round(waitMs / 1000)}s before next DM (random ${settings.minIntervalSec}–${settings.maxIntervalSec}s)…`
+    );
+    const end = Date.now() + waitMs;
+    while (Date.now() < end) {
+      if (await shouldStop()) return false;
+      await sleep(Math.min(1000, end - Date.now()));
+    }
+    return true;
+  }
+
   async function runCampaign(settings) {
     if (campaignRunning) {
+      await emitLog("Campaign already running in this tab — ignoring duplicate start.");
       return { ok: false, reason: "already_running" };
     }
+
+    // Cross-context lock (background revive + page resume)
+    try {
+      const now = Date.now();
+      const { campaignLockUntil } = await chrome.storage.local.get({
+        campaignLockUntil: 0,
+      });
+      if (campaignLockUntil > now) {
+        await emitLog("Campaign lock held — skipping duplicate start.");
+        return { ok: false, reason: "locked" };
+      }
+      await chrome.storage.local.set({ campaignLockUntil: now + 10000 });
+    } catch (_e) {
+      /* ignore */
+    }
+
     campaignRunning = true;
     activeJobId = settings.jobId || null;
+    const dry = isDryRun(settings);
     await chrome.storage.local.set({
       campaignStop: false,
+      campaignAliveAt: Date.now(),
       pendingCampaign: {
-        settings,
-        phase: settings.skipSearch ? "await_results" : "search",
+        settings: { ...settings, dryRun: dry },
+        phase: settings.resumeProfile
+          ? "on_profile"
+          : settings.skipSearch
+            ? "await_results"
+            : "search",
         startedAt: Date.now(),
       },
     });
+    await touchCampaignAlive();
+
+    await emitLog(
+      `Campaign start · dry_run=${dry} · skipSearch=${Boolean(settings.skipSearch)} · keyword=${JSON.stringify(settings.keyword || "")}`
+    );
 
     const stats = {
       attempted: 0,
@@ -483,84 +1180,237 @@
           await finishJob(finishStatus, stats, finishError);
           return { ok: false, reason: "search_failed", stats };
         }
+      } else if (settings.resumeProfile) {
+        await emitLog("Resuming on open profile — Contact → fill → send…");
+        await sleep(800);
       } else {
-        await emitLog("Resuming after search page load…");
-        await sleep(1500);
+        await emitLog("Using search page prepared by extension background…");
+        await sleep(800);
+        const kw = (settings.keyword || "").trim();
+        const q = (new URLSearchParams(location.search).get("query") || "").trim();
+        // Do NOT clear chips / re-navigate when query already matches — that was
+        // aborting the DM flow when the background revived mid-profile.
+        if (kw && q.toLowerCase() !== kw.toLowerCase()) {
+          await clearSkillChips();
+          await ensureSearchApplied(kw);
+          await sleep(1500);
+        }
+        await emitLog(
+          `Search page ready. query=${new URLSearchParams(location.search).get("query") || "(none)"}`
+        );
+      }
+
+      if (settings.resumeProfile) {
+        // Jump straight into Contact on the already-open profile.
+        const limit = Math.max(1, Number(settings.limit) || 10);
+        while (stats.sent + stats.failed < limit) {
+          if (await shouldStop()) {
+            finishStatus = "stopped";
+            break;
+          }
+          stats.attempted += 1;
+          const result = await runContactAndSend(settings);
+          if (result.ok) {
+            stats.sent += 1;
+            stats.contacted_since_search += 1;
+            await pushLiveStats();
+            await emitLog(
+              `${isDryRun(settings) ? "Dry-run" : "Sent"} → ${result.info?.name || "?"} (${result.reason})`
+            );
+          } else if (result.reason === "already_contacted") {
+            stats.skipped += 1;
+            await emitLog(`Skip already contacted → ${result.info?.name || "?"}`);
+          } else if (result.reason === "stopped") {
+            finishStatus = "stopped";
+            break;
+          } else {
+            stats.failed += 1;
+            await emitLog(
+              `Failed → ${result.info?.name || "?"} (${result.reason})`,
+              "warn"
+            );
+          }
+          if (stats.sent + stats.failed >= limit) break;
+          if (!(await pauseStep("before Next →"))) {
+            finishStatus = "stopped";
+            break;
+          }
+          if (await clickNextProfile()) {
+            await emitLog("Clicked next (→) profile.");
+            await chrome.storage.local.set({
+              pendingCampaign: {
+                settings: { ...settings, resumeProfile: true, skipSearch: true },
+                phase: "on_profile",
+                startedAt: Date.now(),
+              },
+            });
+            if (!(await pauseStep("after Next →"))) {
+              finishStatus = "stopped";
+              break;
+            }
+          } else {
+            await emitLog("Next (→) not found — ending campaign.");
+            break;
+          }
+          if (!(await waitBetweenDms(settings))) {
+            finishStatus = "stopped";
+            break;
+          }
+        }
+        await emitLog(
+          `Done. attempted=${stats.attempted} sent=${stats.sent} skipped=${stats.skipped} failed=${stats.failed}`
+        );
+        await finishJob(finishStatus, stats, finishError);
+        return { ok: true, stats };
       }
 
       const { total, cards: initialCards } = await waitForSearchResults();
       let cards = initialCards;
+      const found =
+        total != null && total > 0
+          ? total
+          : Math.max(cards.length, 0);
       await emitLog(
         total != null
-          ? `Search shows ${total.toLocaleString()} freelancers (page cards: ${cards.length}).`
-          : `Found ${cards.length} profile link(s) on page (no total count in UI).`
+          ? `Search shows ${total.toLocaleString()} freelancers (titles on page: ${cards.length}).`
+          : `No total heading found; titles on page: ${cards.length}.`
       );
+      if (!cards.length) {
+        // One more pass after a short settle (lazy list render)
+        await sleep(2000);
+        cards = collectTitleLinks();
+        await emitLog(`Retried title scan: ${cards.length} title(s).`);
+      }
       await pushLiveStats({
-        profiles_found: Math.max(0, Number(total) || cards.length || 0),
+        profiles_found: found,
         contacted_since_search: 0,
       });
-      if (!cards.length && !(total > 0)) {
-        finishStatus = "failed";
-        finishError = "no_results";
-        await finishJob(finishStatus, stats, finishError);
-        return { ok: false, reason: "no_results", stats };
-      }
+
       if (!cards.length) {
-        // Total exists but cards not scraped — still keep count on dashboard; fail outreach.
         finishStatus = "failed";
         finishError = "no_profile_cards";
+        await emitLog(
+          "No clickable card titles found on the SERP — cannot open profile modal.",
+          "error"
+        );
         await finishJob(finishStatus, stats, finishError);
         return { ok: false, reason: "no_profile_cards", stats };
       }
 
       const limit = Math.max(1, Number(settings.limit) || 10);
-      let i = 0;
-      while (stats.sent + stats.failed < limit && i < cards.length) {
+      let openedFirst = false;
+      let titleIndex = 0;
+
+      while (stats.sent + stats.failed < limit) {
         if (await shouldStop()) {
           await emitLog("Campaign stopped.");
           finishStatus = "stopped";
           break;
         }
 
-        // Refresh card list in case DOM recycled
-        cards = collectProfileCards();
-        if (i >= cards.length) break;
-        const card = cards[i];
-        i += 1;
         stats.attempted += 1;
-
         try {
-          card.scrollIntoView({ block: "center", behavior: "instant" });
-          await sleep(400);
-          card.click();
-          await sleep(1500);
+          if (!openedFirst) {
+            const entries = collectTitleEntries();
+            await emitLog(
+              `Card titles found: ${entries.length}` +
+                (entries[0] ? ` · first="${entries[0].text.slice(0, 60)}"` : "")
+            );
+            if (titleIndex >= entries.length) {
+              await emitLog("No more card titles on this page.");
+              break;
+            }
+            const entry = entries[titleIndex];
+            titleIndex += 1;
+            entry.el.scrollIntoView({ block: "center", behavior: "instant" });
+            if (!(await pauseStep("before opening title"))) {
+              finishStatus = "stopped";
+              break;
+            }
+            if (
+              !entry.el.getAttribute?.("data-id")?.includes("freelancer-card-title") &&
+              (isPageChromeText(entry.text) ||
+                isSkillOrFilterText(entry.text) ||
+                !isJobTitleText(entry.text))
+            ) {
+              await emitLog(`Skipping non-card title: ${entry.text.slice(0, 80)}`, "warn");
+              stats.attempted -= 1;
+              continue;
+            }
 
-          const result = await runOne(settings);
+            await emitLog(
+              `Opening card title: ${entry.text.slice(0, 90)}` +
+                (entry.profileId ? ` (id=${entry.profileId})` : "")
+            );
+            const opened = await openCardProfile(entry, settings.keyword || "");
+            if (!opened) {
+              stats.failed += 1;
+              await emitLog(
+                `Failed to open profile modal for: ${entry.text.slice(0, 80)}`,
+                "warn"
+              );
+              continue;
+            }
+            await emitLog("Profile modal open — looking for Contact…");
+            const contactReady = await waitForContactButton(10000);
+            if (!contactReady) {
+              stats.failed += 1;
+              await emitLog(
+                "Profile modal open but Contact button not found.",
+                "warn"
+              );
+              await closeModal();
+              continue;
+            }
+            await emitLog("Contact button visible on modal.");
+
+            try {
+              await chrome.storage.local.set({
+                pendingCampaign: {
+                  settings: {
+                    ...settings,
+                    resumeProfile: true,
+                    skipSearch: true,
+                  },
+                  phase: "on_profile",
+                  startedAt: Date.now(),
+                },
+                campaignAliveAt: Date.now(),
+              });
+            } catch (_e) {
+              /* ignore */
+            }
+
+            if (!(await pauseStep("after opening profile"))) {
+              finishStatus = "stopped";
+              break;
+            }
+            openedFirst = true;
+          }
+
+          // 2–4) Click Contact on modal → fill → send  (from 2nd DM onward, start here)
+          const result = await runContactAndSend(settings);
           if (result.ok) {
             stats.sent += 1;
-            // Always count toward keyword contacted, even if ledger write failed.
             stats.contacted_since_search += 1;
             await pushLiveStats();
             await emitLog(
-              `${settings.dryRun ? "Dry-run" : "Sent"} → ${result.info?.name || "?"} (${result.reason})`
+              `${isDryRun(settings) ? "Dry-run" : "Sent"} → ${result.info?.name || "?"} (${result.reason})`
             );
           } else if (result.reason === "already_contacted") {
             stats.skipped += 1;
             await pushLiveStats();
             await emitLog(`Skip already contacted → ${result.info?.name || "?"}`);
+          } else if (result.reason === "stopped") {
+            finishStatus = "stopped";
+            break;
           } else {
             stats.failed += 1;
             await pushLiveStats();
-            await emitLog(`Failed → ${result.info?.name || "?"} (${result.reason})`);
-          }
-
-          await closeModal();
-          await sleep(500);
-
-          // Back on search list — if we navigated away, go back
-          if (!collectProfileCards().length && /\/freelancer\/[^/?#]+/i.test(location.pathname)) {
-            history.back();
-            await sleep(1500);
+            await emitLog(
+              `Failed → ${result.info?.name || "?"} (${result.reason})`,
+              "warn"
+            );
           }
 
           if (stats.sent + stats.failed >= limit) break;
@@ -569,26 +1419,38 @@
             break;
           }
 
-          const waitMs = randomIntervalMs(
-            settings.minIntervalSec,
-            settings.maxIntervalSec
-          );
-          await emitLog(
-            `Waiting ${Math.round(waitMs / 1000)}s before next DM (random ${settings.minIntervalSec}–${settings.maxIntervalSec}s)…`
-          );
-          const end = Date.now() + waitMs;
-          while (Date.now() < end) {
-            if (await shouldStop()) {
+          // 5) Click → to move to the next freelancer in the modal/viewer
+          if (!(await pauseStep("before Next →"))) {
+            finishStatus = "stopped";
+            break;
+          }
+          const nextOk = await clickNextProfile();
+          if (nextOk) {
+            await emitLog("Clicked next (→) profile.");
+            if (!(await pauseStep("after Next →"))) {
               finishStatus = "stopped";
               break;
             }
-            await sleep(Math.min(1000, end - Date.now()));
+          } else {
+            await emitLog("Next (→) not found — returning to list for next title.");
+            await closeModal();
+            openedFirst = false;
+            if (!collectTitleLinks().length && /\/freelancer\/[^/?#]+/i.test(location.pathname)) {
+              history.back();
+              await sleep(2000);
+            }
+          }
+
+          if (!(await waitBetweenDms(settings))) {
+            finishStatus = "stopped";
+            break;
           }
         } catch (err) {
           stats.failed += 1;
           await pushLiveStats();
-          await emitLog(`Error on card ${i}: ${err}`, "error");
+          await emitLog(`Error on profile: ${err}`, "error");
           await closeModal();
+          openedFirst = false;
         }
       }
 
@@ -607,7 +1469,7 @@
       campaignRunning = false;
       activeJobId = null;
       try {
-        await chrome.storage.local.remove("pendingCampaign");
+        await chrome.storage.local.remove(["pendingCampaign", "campaignAliveAt"]);
       } catch (_e) {
         /* ignore */
       }
@@ -632,12 +1494,32 @@
       if (campaignRunning) return;
 
       const phase = store.pendingCampaign.phase || "search";
-      // Only auto-resume after a navigation that interrupted the search/results wait.
-      if (phase !== "await_results" && phase !== "search") return;
+      const onProfile =
+        phase === "on_profile" &&
+        (profilePanelOpen() || /\/freelancer\/[^/?#]+/i.test(location.pathname));
+      // Only resume Contact when we actually have a profile panel / known on_profile phase.
+      // Do not treat skill filter pages as profiles.
+      if (onProfile && profilePanelOpen()) {
+        const settings = {
+          ...store.pendingCampaign.settings,
+          skipSearch: true,
+          resumeProfile: true,
+          jobId: store.pendingCampaign.settings.jobId || store.activeJobId,
+        };
+        await emitLog("Resuming Contact/Send on open profile panel…");
+        runCampaign(settings);
+        return;
+      }
+      if (phase === "on_profile" && !profilePanelOpen()) {
+        // Stale flag after wrong navigation — fall through to search resume
+        await emitLog("on_profile set but no Contact panel — resuming search flow.");
+      }
+      if (phase !== "await_results" && phase !== "search" && phase !== "on_profile") return;
 
       const settings = {
         ...store.pendingCampaign.settings,
         skipSearch: true,
+        resumeProfile: false,
         jobId: store.pendingCampaign.settings.jobId || store.activeJobId,
       };
       await emitLog("Page reloaded during search — resuming campaign.");
@@ -661,8 +1543,10 @@
     if (msg?.type === "FM_START_CAMPAIGN") {
       // Respond immediately — campaign can run many minutes (channel would time out).
       sendResponse({ ok: true, reason: "started" });
-      runCampaign(msg.settings || {});
-      return false;
+      runCampaign(msg.settings || {}).catch((e) =>
+        console.error("[FM Outreach] campaign error", e)
+      );
+      return true;
     }
     if (msg?.type === "FM_RUN_ONE") {
       runOne(msg.settings || {})
