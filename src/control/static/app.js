@@ -189,16 +189,9 @@ async function refreshPipeline() {
     : `<div class="muted">No applicants yet for Bot ${state.botId}.</div>`;
 }
 
-async function refreshSettings() {
-  const s = await api(`/api/bots/${state.botId}/settings`);
-  $("githubAfter").value = s.github_unlock_after_messages ?? 24;
-  $("maxMessages").value = s.max_messages_per_applicant ?? 30;
-}
-
 async function refreshAll() {
   await refreshBot();
   await refreshPipeline();
-  await refreshSettings();
 }
 
 $("apiToken").value = state.token;
@@ -289,21 +282,6 @@ $("btnStop").addEventListener("click", async () => {
   } finally {
     setActionBusy("stop", false);
     await refreshAll().catch(() => {});
-  }
-});
-
-$("btnSaveSettings").addEventListener("click", async () => {
-  try {
-    await api(`/api/bots/${state.botId}/settings`, {
-      method: "PUT",
-      body: JSON.stringify({
-        github_unlock_after_messages: Number($("githubAfter").value),
-        max_messages_per_applicant: Number($("maxMessages").value),
-      }),
-    });
-    alert("Settings saved");
-  } catch (e) {
-    alert(e.message);
   }
 });
 
