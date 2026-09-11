@@ -265,7 +265,7 @@ def job_events(
         params={
             "job_id": f"eq.{job_id}",
             "select": "*",
-            "order": "id.desc",
+            "order": "created_at.desc,id.desc",
             "limit": str(max(1, min(limit, 500))),
         },
     )

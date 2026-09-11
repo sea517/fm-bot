@@ -120,6 +120,24 @@ async function refreshKeywordStats() {
   }
 }
 
+function formatJobEvents(events) {
+  return [...events]
+    .sort((a, b) => {
+      const ta = Date.parse(a.created_at || 0) || 0;
+      const tb = Date.parse(b.created_at || 0) || 0;
+      if (tb !== ta) return tb - ta;
+      return (b.id || 0) - (a.id || 0);
+    })
+    .map((e) => `${e.created_at} [${e.level}] ${e.message}`)
+    .join("\n");
+}
+
+function setJobLog(text) {
+  const el = $("jobLog");
+  el.textContent = text;
+  el.scrollTop = 0;
+}
+
 async function refreshBot() {
   if (state.busyAction) return;
   const bot = await api(`/api/bots/${state.botId}`);
@@ -143,20 +161,17 @@ async function refreshBot() {
   const logJobId = job?.id || bot.current_job?.id;
   if (logJobId) {
     const events = await api(`/api/jobs/${logJobId}/events?limit=50`);
-    $("jobLog").textContent = events.length
-      ? events
-          .map((e) => `${e.created_at} [${e.level}] ${e.message}`)
-          .join("\n")
-      : "No events.";
+    setJobLog(events.length ? formatJobEvents(events) : "No events.");
   } else {
     const jobs = await api(`/api/bots/${state.botId}/jobs?limit=1`);
     if (jobs[0]) {
       const events = await api(`/api/jobs/${jobs[0].id}/events?limit=50`);
-      $("jobLog").textContent =
+      setJobLog(
         `Last job #${jobs[0].id} [${jobs[0].status}]\n` +
-        events.map((e) => `${e.created_at} [${e.level}] ${e.message}`).join("\n");
+          (events.length ? formatJobEvents(events) : "No events.")
+      );
     } else {
-      $("jobLog").textContent = "No jobs yet.";
+      setJobLog("No jobs yet.");
     }
   }
 }
