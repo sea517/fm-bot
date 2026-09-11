@@ -1,3 +1,5 @@
+const DEFAULT_API_BASE_URL = "https://fm-bot.vercel.app";
+
 const $ = (id) => document.getElementById(id);
 
 function log(msg) {
@@ -9,7 +11,7 @@ function log(msg) {
 function readWorkerSettings() {
   return {
     botId: Math.max(1, Math.min(3, Number($("botId").value) || 1)),
-    apiBaseUrl: $("apiBaseUrl").value.trim().replace(/\/$/, ""),
+    apiBaseUrl: ($("apiBaseUrl").value.trim() || DEFAULT_API_BASE_URL).replace(/\/$/, ""),
     botToken: $("botToken").value.trim(),
     enabled: $("enabled").checked,
   };
@@ -31,7 +33,7 @@ function readLocalSettings() {
 async function loadSettings() {
   const data = await chrome.storage.sync.get({
     botId: 1,
-    apiBaseUrl: "",
+    apiBaseUrl: DEFAULT_API_BASE_URL,
     botToken: "",
     enabled: true,
     keyword: "",
@@ -41,7 +43,7 @@ async function loadSettings() {
     dryRun: true,
   });
   $("botId").value = String(data.botId || 1);
-  $("apiBaseUrl").value = data.apiBaseUrl || "";
+  $("apiBaseUrl").value = data.apiBaseUrl || DEFAULT_API_BASE_URL;
   $("botToken").value = data.botToken || "";
   $("enabled").checked = data.enabled !== false;
   $("keyword").value = data.keyword || "";

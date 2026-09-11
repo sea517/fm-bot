@@ -83,27 +83,6 @@ async function refreshPipeline() {
     : `<div class="muted">No applicants yet for Bot ${state.botId}.</div>`;
 }
 
-async function refreshContacts() {
-  const q = $("contactQ").value.trim();
-  const qs = q ? `?q=${encodeURIComponent(q)}` : "";
-  const rows = await api(`/api/bots/${state.botId}/contacts${qs}`);
-  $("contacts").innerHTML = rows.length
-    ? rows
-        .map(
-          (c) =>
-            `<div class="row"><div><strong>${c.display_name || "—"}</strong><br/><span class="muted">${c.profile_key}</span></div>` +
-            `<div><button data-block="${c.id}" type="button" class="ghost">Block</button><div class="muted">${c.status}</div></div></div>`
-        )
-        .join("")
-    : `<div class="muted">No contacts.</div>`;
-  $("contacts").querySelectorAll("[data-block]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      await api(`/api/contacts/${btn.getAttribute("data-block")}/block`, { method: "POST" });
-      refreshContacts();
-    });
-  });
-}
-
 async function refreshSettings() {
   const s = await api(`/api/bots/${state.botId}/settings`);
   $("githubAfter").value = s.github_unlock_after_messages ?? 20;
@@ -113,7 +92,6 @@ async function refreshSettings() {
 async function refreshAll() {
   await refreshBot();
   await refreshPipeline();
-  await refreshContacts();
   await refreshSettings();
 }
 
@@ -177,10 +155,6 @@ $("btnStop").addEventListener("click", async () => {
     alert(e.message);
   }
 });
-
-$("btnSearchContacts").addEventListener("click", () =>
-  refreshContacts().catch((e) => alert(e.message))
-);
 
 $("btnSaveSettings").addEventListener("click", async () => {
   try {

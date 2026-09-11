@@ -1,14 +1,19 @@
 /* Background: heartbeat + claim outreach jobs from Control API. */
 
+const DEFAULT_API_BASE_URL = "https://fm-bot.vercel.app";
 const POLL_MS = 12000;
 
 async function settings() {
-  return chrome.storage.sync.get({
-    apiBaseUrl: "",
+  const s = await chrome.storage.sync.get({
+    apiBaseUrl: DEFAULT_API_BASE_URL,
     botId: 1,
     botToken: "",
     enabled: true,
   });
+  return {
+    ...s,
+    apiBaseUrl: (s.apiBaseUrl || DEFAULT_API_BASE_URL).replace(/\/$/, ""),
+  };
 }
 
 async function api(path, { method = "GET", body } = {}) {

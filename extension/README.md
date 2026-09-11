@@ -20,7 +20,7 @@ Use a **different Chrome profile** per freelancermap account (Bot 1 / 2 / 3).
 | Control | Purpose |
 |---------|---------|
 | Bot ID | 1, 2, or 3 — must match dashboard tab |
-| Control API URL | VPS base URL, e.g. `http://1.2.3.4:8090` |
+| Control API URL | Defaults to `https://fm-bot.vercel.app` (change only if needed) |
 | Bot token | `BOT_N_TOKEN` from server `.env` (not Supabase service role) |
 | Poll dashboard | Heartbeat + claim queued jobs (~12s) |
 | Local campaign | Optional manual start without the dashboard |
@@ -29,7 +29,7 @@ Select the **project** in the Contact form yourself — the extension fills subj
 
 ## Flow
 
-1. VPS: `PYTHONPATH=. python3 -m src.main control-serve`
+1. Dashboard on Vercel (e.g. `https://fm-bot.vercel.app`)
 2. Dashboard: create job on Bot N (start with **Dry run**)
 3. Extension on profile N claims the job and runs the campaign
 4. Events + finish status appear in the dashboard job log
