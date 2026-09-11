@@ -30,12 +30,13 @@
         <div class="card" id="botCard">Loading…</div>
         <div class="row-actions">
           <button id="btnRefresh" type="button" class="ghost">Refresh</button>
-          <button id="btnStop" type="button" class="danger">Stop current job</button>
+          <button id="btnStart" type="button" class="primary">Start</button>
+          <button id="btnStop" type="button" class="danger hidden">Stop</button>
         </div>
       </section>
 
       <section class="panel">
-        <h2>Outreach — create job</h2>
+        <h2>Outreach</h2>
         <div class="grid2">
           <label>Keyword<input id="keyword" type="text" placeholder="FastAPI Next.js" /></label>
           <label>Max freelancers<input id="limit" type="number" value="10" min="1" max="500" /></label>
@@ -43,7 +44,6 @@
           <label>Max interval (sec)<input id="maxInterval" type="number" value="300" min="10" /></label>
         </div>
         <label class="check"><input id="dryRun" type="checkbox" checked /> Dry run (don’t send)</label>
-        <button id="btnStart" type="button" class="primary">Start job for this bot</button>
       </section>
 
       <section class="panel">

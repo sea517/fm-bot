@@ -37,6 +37,7 @@ button { cursor: pointer; font-weight: 600; }
 button.primary { background: var(--accent); color: #041018; border-color: transparent; }
 button.ghost { background: transparent; }
 button.danger { color: #ffb4b4; border-color: #5a3030; }
+.hidden { display: none !important; }
 .tabs { display: flex; gap: 8px; margin: 18px 0; }
 .tab {
   flex: 1;

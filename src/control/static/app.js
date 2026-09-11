@@ -39,9 +39,25 @@ function statusBadge(status) {
   return `<span class="badge ${s}">${s}</span>`;
 }
 
+function isJobActive(job) {
+  return job && ["queued", "running", "cancel_requested"].includes(job.status);
+}
+
+function setRunControls(running) {
+  $("btnStart").classList.toggle("hidden", running);
+  $("btnStop").classList.toggle("hidden", !running);
+}
+
 async function refreshBot() {
   const bot = await api(`/api/bots/${state.botId}`);
-  const job = bot.current_job;
+  let job = bot.current_job;
+  if (!isJobActive(job)) {
+    const jobs = await api(`/api/bots/${state.botId}/jobs?limit=5`);
+    job = jobs.find((j) => isJobActive(j)) || job || null;
+  }
+  const running = isJobActive(job) || bot.status === "busy";
+  setRunControls(running);
+
   const jobLine = job
     ? `Job #${job.id} [${job.status}] keyword="${job.keyword}" dry_run=${job.dry_run}`
     : "No current job";
@@ -115,19 +131,24 @@ $("btnRefresh").addEventListener("click", () => refreshAll().catch((e) => alert(
 
 $("btnStart").addEventListener("click", async () => {
   try {
+    const keyword = $("keyword").value.trim();
+    if (!keyword) {
+      alert("Enter a keyword in Outreach first");
+      return;
+    }
     const body = {
-      keyword: $("keyword").value.trim(),
+      keyword,
       min_interval_sec: Number($("minInterval").value),
       max_interval_sec: Number($("maxInterval").value),
       max_freelancers: Number($("limit").value),
       dry_run: $("dryRun").checked,
     };
-    const job = await api(`/api/bots/${state.botId}/jobs`, {
+    await api(`/api/bots/${state.botId}/jobs`, {
       method: "POST",
       body: JSON.stringify(body),
     });
-    alert(`Job #${job.id} queued for Bot ${state.botId}`);
-    refreshAll();
+    setRunControls(true);
+    await refreshAll();
   } catch (e) {
     alert(e.message);
   }
@@ -136,21 +157,19 @@ $("btnStart").addEventListener("click", async () => {
 $("btnStop").addEventListener("click", async () => {
   try {
     const bot = await api(`/api/bots/${state.botId}`);
-    const jobId = bot.current_job_id || bot.current_job?.id;
+    let jobId = bot.current_job_id || bot.current_job?.id;
     if (!jobId) {
       const jobs = await api(`/api/bots/${state.botId}/jobs?limit=5`);
-      const active = jobs.find((j) =>
-        ["queued", "running", "cancel_requested"].includes(j.status)
-      );
+      const active = jobs.find((j) => isJobActive(j));
       if (!active) {
         alert("No active job");
+        setRunControls(false);
         return;
       }
-      await api(`/api/bots/${state.botId}/jobs/${active.id}/stop`, { method: "POST" });
-    } else {
-      await api(`/api/bots/${state.botId}/jobs/${jobId}/stop`, { method: "POST" });
+      jobId = active.id;
     }
-    refreshAll();
+    await api(`/api/bots/${state.botId}/jobs/${jobId}/stop`, { method: "POST" });
+    await refreshAll();
   } catch (e) {
     alert(e.message);
   }
