@@ -110,6 +110,7 @@ On each machine/profile:
 |-------|------------|
 | All routes `{"detail":"Not Found"}` | Old rewrite-to-`/api` bug — use root `app.py`, no catch-all rewrite; redeploy |
 | Build installs Playwright / times out | Set install command to `pip install -r requirements-vercel.txt` |
+| `500 FUNCTION_INVOCATION_FAILED` on open | Check function logs; usually missing pip dep (e.g. `requests`) in `requirements-vercel.txt` — redeploy after fix |
 | `supabase: false` on `/api/health` | Missing env vars in Vercel (redeploy after adding) |
 | 503 table missing | Run `control_plane.sql` |
 | Extension heartbeat 401 | Wrong bot token or Bot ID |
