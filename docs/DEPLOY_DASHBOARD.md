@@ -50,37 +50,24 @@ In Vercel → Project → **Settings → Environment Variables**, set for Produc
 
 ## 3. Deploy
 
-From the repo root (this project):
+From the repo root (folder with `vercel.json`, `app.py`, `src/`):
 
 ```bash
-# once
 npm i -g vercel   # or: npx vercel
-
-# install slim deps locally if you want; Vercel uses requirements-vercel.txt
-vercel link
-vercel env pull   # optional
-
-# production
 vercel --prod
 ```
 
-Or connect the GitHub repo in the Vercel dashboard and deploy on push.
+Or connect the GitHub repo in the Vercel dashboard (deploy on push).
 
-**Install command** (Project → Settings → General → Build & Development, or CLI):
-
-```text
-pip install -r requirements-vercel.txt
-```
-
-If the UI has no install override, set in `vercel.json` is not always enough for
-pip — use the dashboard **Install Command**:
+**Install command** (already in `vercel.json`):
 
 ```text
 pip install -r requirements-vercel.txt
 ```
 
-Root `requirements.txt` includes Playwright and is **too heavy** for the serverless
-function; always use `requirements-vercel.txt` for this project on Vercel.
+Entrypoint is `app.py` → `app` (FastAPI). Do **not** rewrite everything to `/api` — that breaks routing.
+
+Root `requirements.txt` includes Playwright and is too heavy; use `requirements-vercel.txt` on Vercel.
 
 ## 4. Open the dashboard
 
@@ -106,6 +93,7 @@ On each machine/profile:
 
 | Issue | What to do |
 |-------|------------|
+| All routes `{"detail":"Not Found"}` | Old rewrite-to-`/api` bug — use root `app.py`, no catch-all rewrite; redeploy |
 | Build installs Playwright / times out | Set install command to `pip install -r requirements-vercel.txt` |
 | `supabase: false` on `/api/health` | Missing env vars in Vercel (redeploy after adding) |
 | 503 table missing | Run `control_plane.sql` |

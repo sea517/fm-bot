@@ -1,5 +1,4 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "installCommand": "pip install -r requirements-vercel.txt",
-  "rewrites": [{ "source": "/(.*)", "destination": "/api" }]
+  "installCommand": "pip install -r requirements-vercel.txt"
 }
