@@ -100,6 +100,37 @@ def sb_patch(
     return data if isinstance(data, list) else [data]
 
 
+def sb_count(
+    table: str,
+    *,
+    params: dict[str, str] | None = None,
+) -> int:
+    """Exact row count via PostgREST Content-Range."""
+    headers = _headers(prefer="count=exact")
+    headers["Range"] = "0-0"
+    query = dict(params or {})
+    query.setdefault("select", "id")
+    response = requests.get(
+        _url(table),
+        headers=headers,
+        params=query,
+        timeout=_TIMEOUT,
+    )
+    if not response.ok:
+        logger.error("Supabase COUNT %s failed %s: %s", table, response.status_code, response.text[:300])
+        if response.status_code == 404 and "PGRST205" in response.text:
+            raise RuntimeError(
+                f"Supabase table '{table}' missing — run supabase/control_plane.sql in the SQL Editor"
+            )
+        response.raise_for_status()
+    cr = response.headers.get("Content-Range") or response.headers.get("content-range") or ""
+    if "/" in cr:
+        total = cr.rsplit("/", 1)[-1]
+        if total != "*":
+            return int(total)
+    return 0
+
+
 def sb_upsert(
     table: str,
     row: dict[str, Any],

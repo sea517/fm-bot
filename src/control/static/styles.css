@@ -111,6 +111,45 @@ button.tab:hover:not(.active) {
 label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; margin-bottom: 8px; }
 .check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); margin: 8px 0 12px; }
 .row-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.stats-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+.stats-row > div {
+  background: #0d141d;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.stats-row strong {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.stats-row .muted { margin: 0; font-size: 12px; }
+.tip { margin: 0 0 10px; font-size: 12px; }
+.tip code {
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #0d141d;
+  border: 1px solid var(--line);
+}
+textarea {
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  padding: 8px 10px;
+  font: inherit;
+  resize: vertical;
+  min-height: 120px;
+}
 .log {
   margin: 0;
   max-height: 220px;

@@ -28,6 +28,10 @@
       <section class="panel" id="panelStatus">
         <h2>Bot status</h2>
         <div class="card" id="botCard">Loading…</div>
+        <div class="stats-row" id="keywordStats">
+          <div><span class="muted">Available to contact</span><strong id="statAvailable">—</strong></div>
+          <div><span class="muted">Contacted (this search)</span><strong id="statContacted">—</strong></div>
+        </div>
         <div class="row-actions">
           <button id="btnRefresh" type="button" class="ghost">Refresh</button>
           <button id="btnStart" type="button" class="primary">Start</button>
@@ -43,6 +47,12 @@
           <label>Min interval (sec)<input id="minInterval" type="number" value="240" min="10" /></label>
           <label>Max interval (sec)<input id="maxInterval" type="number" value="300" min="10" /></label>
         </div>
+        <label>Subject
+          <input id="subject" type="text" placeholder="Email subject…" />
+        </label>
+        <label>Contact form
+          <textarea id="messageBody" rows="8" placeholder="Message sent to every freelancer…"></textarea>
+        </label>
         <label class="check"><input id="dryRun" type="checkbox" checked /> Dry run (don’t send)</label>
       </section>
 

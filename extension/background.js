@@ -99,6 +99,8 @@ async function runClaimedJob(job) {
 
   const campaignSettings = {
     keyword: job.keyword,
+    subject: job.subject || "",
+    messageBody: job.message_body || "",
     minIntervalSec: job.min_interval_sec,
     maxIntervalSec: job.max_interval_sec,
     limit: job.max_freelancers,
@@ -132,6 +134,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     settings().then(async (s) => {
       if (msg.jobId) {
         await reportEvent(s.botId, msg.jobId, msg.text, msg.level || "info");
+      }
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+  if (msg?.type === "FM_JOB_STATS") {
+    settings().then(async (s) => {
+      try {
+        if (msg.jobId) {
+          await api(`/api/bots/${s.botId}/jobs/${msg.jobId}/stats`, {
+            method: "POST",
+            body: { stats: msg.stats || {} },
+          });
+        }
+      } catch (e) {
+        console.warn("stats update failed", e);
       }
       sendResponse({ ok: true });
     });

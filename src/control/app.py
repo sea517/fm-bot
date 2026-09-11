@@ -172,6 +172,8 @@ def create_job(
         {
             "bot_id": bot_id,
             "keyword": body.keyword,
+            "subject": body.subject,
+            "message_body": body.message_body,
             "min_interval_sec": body.min_interval_sec,
             "max_interval_sec": body.max_interval_sec,
             "max_freelancers": body.max_freelancers,
@@ -452,6 +454,37 @@ def finish_job(
     return updated[0] if updated else {"ok": True}
 
 
+@app.post("/api/bots/{bot_id}/jobs/{job_id}/stats")
+def update_job_stats(
+    bot_id: int,
+    job_id: int,
+    body: JobStatsBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Merge live campaign stats (e.g. profiles_found) while a job is running."""
+    auth.require_bot(bot_id, authorization)
+    _require_supabase()
+    rows = sb_get(
+        "outreach_jobs",
+        params={
+            "id": f"eq.{job_id}",
+            "bot_id": f"eq.{bot_id}",
+            "select": "id,stats",
+            "limit": "1",
+        },
+    )
+    if not rows:
+        raise HTTPException(404, "job not found")
+    merged = dict(rows[0].get("stats") or {})
+    merged.update(body.stats or {})
+    updated = sb_patch(
+        "outreach_jobs",
+        match={"id": f"eq.{job_id}", "bot_id": f"eq.{bot_id}"},
+        row={"stats": merged, "updated_at": _now()},
+    )
+    return updated[0] if updated else {"ok": True, "stats": merged}
+
+
 @app.post("/api/bots/{bot_id}/contacts")
 def upsert_contact(
     bot_id: int,
@@ -567,6 +600,64 @@ def block_contact(
     if not rows:
         raise HTTPException(404)
     return rows[0]
+
+
+@app.get("/api/bots/{bot_id}/outreach-stats")
+def outreach_stats(
+    bot_id: int,
+    keyword: str = "",
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Counts for the current keyword's last search run.
+
+    - contacted: freelancers contacted since that search (job stats), not the global ledger
+    - available: remaining = profiles_found - contacted
+    """
+    auth.require_dashboard(authorization)
+    if bot_id not in (1, 2, 3):
+        raise HTTPException(404)
+    _require_supabase()
+    kw = keyword.strip()
+    available = None
+    contacted = None
+    profiles_found = None
+    last_search_at = None
+    if kw:
+        jobs = sb_get(
+            "outreach_jobs",
+            params={
+                "bot_id": f"eq.{bot_id}",
+                "keyword": f"eq.{kw}",
+                "select": "id,stats,started_at,finished_at,created_at,status",
+                "order": "created_at.desc",
+                "limit": "20",
+            },
+        )
+        for j in jobs:
+            stats = j.get("stats") or {}
+            found = stats.get("profiles_found")
+            if found is None:
+                continue
+            try:
+                profiles_found = max(0, int(found))
+            except (TypeError, ValueError):
+                continue
+            try:
+                contacted = max(0, int(stats.get("contacted_since_search") or 0))
+            except (TypeError, ValueError):
+                contacted = 0
+            available = max(0, profiles_found - contacted)
+            last_search_at = (
+                j.get("started_at") or j.get("finished_at") or j.get("created_at")
+            )
+            break
+    return {
+        "keyword": kw or None,
+        "profiles_found": profiles_found,
+        "contacted": contacted,
+        "available": available,
+        "last_search_at": last_search_at,
+    }
 
 
 @app.get("/api/bots/{bot_id}/applicants")

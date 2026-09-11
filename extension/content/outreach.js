@@ -332,8 +332,8 @@
     }
 
     const detail = T.pickDetail(info.title, info.location);
-    const subject = T.OUTREACH_SUBJECT;
-    const body = T.renderBody(info.name, detail);
+    const subject = T.renderSubject(settings.subject, info.name);
+    const body = T.renderBody(settings.messageBody || settings.body, info.name, detail);
     const filled = await fillForm({ subject, body });
     if (!filled) return { ok: false, reason: "fill_failed", info };
 
@@ -344,11 +344,16 @@
     const sent = await clickSend();
     if (!sent) return { ok: false, reason: "send_failed", info };
 
-    await T.markContacted(settings, {
-      name: info.name,
-      profileKey: info.profileKey,
-      projectName: settings.projectName || null,
-    });
+    // Count as contacted even if Supabase ledger write fails.
+    try {
+      await T.markContacted(settings, {
+        name: info.name,
+        profileKey: info.profileKey,
+        projectName: settings.projectName || null,
+      });
+    } catch (_e) {
+      /* ignore ledger errors */
+    }
     return { ok: true, reason: "sent", info, subject, detail };
   }
 
@@ -360,9 +365,38 @@
     activeJobId = settings.jobId || null;
     await chrome.storage.local.set({ campaignStop: false });
 
-    const stats = { attempted: 0, sent: 0, skipped: 0, failed: 0 };
+    const stats = {
+      attempted: 0,
+      sent: 0,
+      skipped: 0,
+      failed: 0,
+      profiles_found: 0,
+      contacted_since_search: 0,
+    };
     let finishStatus = "completed";
     let finishError = null;
+
+    async function pushLiveStats(extra = {}) {
+      Object.assign(stats, extra);
+      if (!activeJobId) return;
+      try {
+        await chrome.runtime.sendMessage({
+          type: "FM_JOB_STATS",
+          jobId: activeJobId,
+          stats: {
+            profiles_found: stats.profiles_found,
+            contacted_since_search: stats.contacted_since_search,
+            attempted: stats.attempted,
+            sent: stats.sent,
+            skipped: stats.skipped,
+            failed: stats.failed,
+          },
+        });
+      } catch (_e) {
+        /* ignore */
+      }
+    }
+
     try {
       const okSearch = await runSearch(settings.keyword);
       if (!okSearch) {
@@ -374,6 +408,10 @@
 
       let cards = collectProfileCards();
       await emitLog(`Found ${cards.length} profile link(s) on page.`);
+      await pushLiveStats({
+        profiles_found: cards.length,
+        contacted_since_search: 0,
+      });
       if (!cards.length) {
         finishStatus = "failed";
         finishError = "no_results";
@@ -406,14 +444,19 @@
           const result = await runOne(settings);
           if (result.ok) {
             stats.sent += 1;
+            // Always count toward keyword contacted, even if ledger write failed.
+            stats.contacted_since_search += 1;
+            await pushLiveStats();
             await emitLog(
               `${settings.dryRun ? "Dry-run" : "Sent"} → ${result.info?.name || "?"} (${result.reason})`
             );
           } else if (result.reason === "already_contacted") {
             stats.skipped += 1;
+            await pushLiveStats();
             await emitLog(`Skip already contacted → ${result.info?.name || "?"}`);
           } else {
             stats.failed += 1;
+            await pushLiveStats();
             await emitLog(`Failed → ${result.info?.name || "?"} (${result.reason})`);
           }
 
@@ -447,13 +490,14 @@
           }
         } catch (err) {
           stats.failed += 1;
+          await pushLiveStats();
           await emitLog(`Error on card ${i}: ${err}`, "error");
           await closeModal();
         }
       }
 
       await emitLog(
-        `Done. attempted=${stats.attempted} sent=${stats.sent} skipped=${stats.skipped} failed=${stats.failed}`
+        `Done. attempted=${stats.attempted} sent=${stats.sent} skipped=${stats.skipped} failed=${stats.failed} contacted_since_search=${stats.contacted_since_search}`
       );
       await finishJob(finishStatus, stats, finishError);
       return { ok: true, stats };

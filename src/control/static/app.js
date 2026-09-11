@@ -18,7 +18,7 @@ async function api(path, opts = {}) {
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${t}`,
-    20|      ...(opts.headers || {}),
+      ...(opts.headers || {}),
     },
   });
   const text = await res.text();
@@ -81,6 +81,45 @@ async function findActiveJob(bot) {
   return jobs.find((j) => isJobRunning(j)) || null;
 }
 
+async function refreshKeywordStats() {
+  if (!token()) {
+    $("statAvailable").textContent = "—";
+    $("statContacted").textContent = "—";
+    return;
+  }
+  const keyword = $("keyword").value.trim();
+  const qs = keyword ? `?keyword=${encodeURIComponent(keyword)}` : "";
+  try {
+    const s = await api(`/api/bots/${state.botId}/outreach-stats${qs}`);
+    if (!keyword) {
+      $("statAvailable").textContent = "—";
+      $("statContacted").textContent = "—";
+      $("statAvailable").title = "Enter a keyword to load counts for the last search";
+      $("statContacted").title = "";
+      return;
+    }
+    if (s.profiles_found == null) {
+      $("statAvailable").textContent = "—";
+      $("statContacted").textContent = "—";
+      $("statAvailable").title =
+        "No search yet for this keyword — Start a job (dry run is fine) to count results";
+      $("statContacted").title = "";
+      return;
+    }
+    $("statContacted").textContent = String(s.contacted ?? 0);
+    $("statAvailable").textContent = String(s.available ?? 0);
+    $("statContacted").title =
+      "Contacted since last search for this keyword (counts even if Supabase ledger write fails)";
+    $("statAvailable").title = s.last_search_at
+      ? `Remaining = found (${s.profiles_found}) − contacted · last search ${s.last_search_at}`
+      : `Remaining = found (${s.profiles_found}) − contacted`;
+  } catch (e) {
+    $("statAvailable").textContent = "—";
+    $("statContacted").textContent = "—";
+    $("statContacted").title = e.message || String(e);
+  }
+}
+
 async function refreshBot() {
   if (state.busyAction) return;
   const bot = await api(`/api/bots/${state.botId}`);
@@ -98,6 +137,8 @@ async function refreshBot() {
     `<div>Last heartbeat: ${bot.last_heartbeat_at || "—"}</div>` +
     `<div>${jobLine}</div>` +
     (bot.last_error ? `<div>Error: ${bot.last_error}</div>` : "");
+
+  await refreshKeywordStats();
 
   const logJobId = job?.id || bot.current_job?.id;
   if (logJobId) {
@@ -165,6 +206,14 @@ $("btnRefresh").addEventListener("click", () => {
   refreshAll().catch((e) => alert(e.message));
 });
 
+let keywordTimer = null;
+$("keyword").addEventListener("input", () => {
+  clearTimeout(keywordTimer);
+  keywordTimer = setTimeout(() => {
+    refreshKeywordStats().catch(() => {});
+  }, 350);
+});
+
 $("btnStart").addEventListener("click", async () => {
   if (state.busyAction) return;
   try {
@@ -173,9 +222,17 @@ $("btnStart").addEventListener("click", async () => {
       alert("Enter a keyword in Outreach first");
       return;
     }
+    const subject = $("subject").value.trim();
+    const messageBody = $("messageBody").value.trim();
+    if (!subject || !messageBody) {
+      alert("Enter subject and contact form before Start");
+      return;
+    }
     setActionBusy("start", true, "Starting…");
     const body = {
       keyword,
+      subject,
+      message_body: messageBody,
       min_interval_sec: Number($("minInterval").value),
       max_interval_sec: Number($("maxInterval").value),
       max_freelancers: Number($("limit").value),

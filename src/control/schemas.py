@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field, field_validator
 
 class CreateJobBody(BaseModel):
     keyword: str = Field(min_length=1, max_length=200)
+    subject: str = Field(min_length=1, max_length=300)
+    message_body: str = Field(min_length=1, max_length=8000)
     min_interval_sec: int = Field(default=240, ge=10, le=3600)
     max_interval_sec: int = Field(default=300, ge=10, le=7200)
     max_freelancers: int = Field(default=10, ge=1, le=500)
@@ -19,6 +21,14 @@ class CreateJobBody(BaseModel):
         v = v.strip()
         if not v:
             raise ValueError("keyword required")
+        return v
+
+    @field_validator("subject", "message_body")
+    @classmethod
+    def strip_text(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("required")
         return v
 
     @field_validator("max_interval_sec")

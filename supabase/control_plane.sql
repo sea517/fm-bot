@@ -25,6 +25,8 @@ create table if not exists public.outreach_jobs (
   id bigint generated always as identity primary key,
   bot_id smallint not null references public.bots(id),
   keyword text not null,
+  subject text not null default '',
+  message_body text not null default '',
   min_interval_sec int not null default 240 check (min_interval_sec >= 10),
   max_interval_sec int not null default 300 check (max_interval_sec >= 10),
   max_freelancers int not null default 10 check (max_freelancers >= 1 and max_freelancers <= 500),
@@ -128,3 +130,8 @@ comment on table public.fm_contacts is 'Cross-bot duplicate ledger for freelance
 -- If bots was created earlier without settings:
 alter table public.bots
   add column if not exists settings jsonb not null default '{}'::jsonb;
+
+alter table public.outreach_jobs
+  add column if not exists subject text not null default '';
+alter table public.outreach_jobs
+  add column if not exists message_body text not null default '';
