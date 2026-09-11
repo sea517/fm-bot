@@ -91,7 +91,7 @@
   }
 
   function randomIntervalMs(minSec, maxSec) {
-    const a = Math.max(1, Number(minSec) || 60);
+    const a = Math.max(1, Number(minSec) || 240);
     const b = Math.max(a, Number(maxSec) || a);
     const sec = a + Math.floor(Math.random() * (b - a + 1));
     return sec * 1000;

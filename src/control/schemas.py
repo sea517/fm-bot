@@ -8,8 +8,8 @@ from pydantic import BaseModel, Field, field_validator
 
 class CreateJobBody(BaseModel):
     keyword: str = Field(min_length=1, max_length=200)
-    min_interval_sec: int = Field(default=60, ge=10, le=3600)
-    max_interval_sec: int = Field(default=180, ge=10, le=7200)
+    min_interval_sec: int = Field(default=240, ge=10, le=3600)
+    max_interval_sec: int = Field(default=300, ge=10, le=7200)
     max_freelancers: int = Field(default=10, ge=1, le=500)
     dry_run: bool = True
 
@@ -24,7 +24,7 @@ class CreateJobBody(BaseModel):
     @field_validator("max_interval_sec")
     @classmethod
     def max_ge_min(cls, v: int, info) -> int:
-        mn = info.data.get("min_interval_sec", 60)
+        mn = info.data.get("min_interval_sec", 240)
         if v < mn:
             raise ValueError("max_interval_sec must be >= min_interval_sec")
         return v

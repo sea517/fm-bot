@@ -25,8 +25,8 @@ create table if not exists public.outreach_jobs (
   id bigint generated always as identity primary key,
   bot_id smallint not null references public.bots(id),
   keyword text not null,
-  min_interval_sec int not null default 60 check (min_interval_sec >= 10),
-  max_interval_sec int not null default 180 check (max_interval_sec >= 10),
+  min_interval_sec int not null default 240 check (min_interval_sec >= 10),
+  max_interval_sec int not null default 300 check (max_interval_sec >= 10),
   max_freelancers int not null default 10 check (max_freelancers >= 1 and max_freelancers <= 500),
   dry_run boolean not null default true,
   status text not null default 'queued'
