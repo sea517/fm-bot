@@ -1,0 +1,152 @@
+const $ = (id) => document.getElementById(id);
+
+function log(msg) {
+  const el = $("log");
+  const line = typeof msg === "string" ? msg : JSON.stringify(msg, null, 2);
+  el.textContent = `${new Date().toLocaleTimeString()}  ${line}\n` + el.textContent;
+}
+
+function readWorkerSettings() {
+  return {
+    botId: Math.max(1, Math.min(3, Number($("botId").value) || 1)),
+    apiBaseUrl: $("apiBaseUrl").value.trim().replace(/\/$/, ""),
+    botToken: $("botToken").value.trim(),
+    enabled: $("enabled").checked,
+  };
+}
+
+function readLocalSettings() {
+  const minInterval = Math.max(10, Number($("minInterval").value) || 60);
+  let maxInterval = Math.max(10, Number($("maxInterval").value) || 180);
+  if (maxInterval < minInterval) maxInterval = minInterval;
+  return {
+    keyword: $("keyword").value.trim(),
+    minIntervalSec: minInterval,
+    maxIntervalSec: maxInterval,
+    limit: Math.max(1, Math.min(200, Number($("limit").value) || 10)),
+    dryRun: $("dryRun").checked,
+  };
+}
+
+async function loadSettings() {
+  const data = await chrome.storage.sync.get({
+    botId: 1,
+    apiBaseUrl: "",
+    botToken: "",
+    enabled: true,
+    keyword: "",
+    minIntervalSec: 60,
+    maxIntervalSec: 180,
+    limit: 10,
+    dryRun: true,
+  });
+  $("botId").value = String(data.botId || 1);
+  $("apiBaseUrl").value = data.apiBaseUrl || "";
+  $("botToken").value = data.botToken || "";
+  $("enabled").checked = data.enabled !== false;
+  $("keyword").value = data.keyword || "";
+  $("minInterval").value = data.minIntervalSec ?? 60;
+  $("maxInterval").value = data.maxIntervalSec ?? 180;
+  $("limit").value = data.limit ?? 10;
+  $("dryRun").checked = Boolean(data.dryRun);
+}
+
+async function saveSettings() {
+  const worker = readWorkerSettings();
+  const local = readLocalSettings();
+  await chrome.storage.sync.set({ ...worker, ...local });
+  log(
+    `Saved Bot ${worker.botId} → ${worker.apiBaseUrl || "(no API URL)"} poll=${worker.enabled}`
+  );
+  return { ...worker, ...local };
+}
+
+async function pingApi() {
+  const s = readWorkerSettings();
+  if (!s.apiBaseUrl || !s.botToken) {
+    log("Set API URL and bot token first.");
+    return;
+  }
+  const res = await fetch(`${s.apiBaseUrl}/api/health`);
+  const health = await res.json();
+  log(`Health: ok=${health.ok} supabase=${health.supabase}`);
+  const hb = await fetch(`${s.apiBaseUrl}/api/bots/${s.botId}/heartbeat`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${s.botToken}`,
+    },
+    body: JSON.stringify({ status: "online" }),
+  });
+  if (!hb.ok) {
+    const t = await hb.text();
+    throw new Error(`Heartbeat failed: ${hb.status} ${t}`);
+  }
+  log(`Heartbeat OK for Bot ${s.botId}`);
+}
+
+async function activeFreelancerTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id || !tab.url) throw new Error("No active tab");
+  if (!/freelancermap\.(com|de)/i.test(tab.url)) {
+    throw new Error("Activate the freelancermap.com/freelancer tab first");
+  }
+  return tab;
+}
+
+async function sendToTab(payload) {
+  const tab = await activeFreelancerTab();
+  try {
+    return await chrome.tabs.sendMessage(tab.id, payload);
+  } catch (_err) {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: [
+        "shared/templates.js",
+        "shared/supabase.js",
+        "content/outreach.js",
+      ],
+    });
+    return await chrome.tabs.sendMessage(tab.id, payload);
+  }
+}
+
+$("btnSave").addEventListener("click", () => {
+  saveSettings()
+    .then(() => pingApi())
+    .catch((e) => log(String(e.message || e)));
+});
+
+$("btnStop").addEventListener("click", async () => {
+  try {
+    await chrome.storage.local.set({ campaignStop: true });
+    await sendToTab({ type: "FM_STOP_CAMPAIGN" });
+    log("Stop requested.");
+  } catch (e) {
+    log(String(e.message || e));
+  }
+});
+
+$("btnLocalStart").addEventListener("click", async () => {
+  try {
+    const settings = await saveSettings();
+    if (!settings.keyword) {
+      log("Enter a search keyword first.");
+      return;
+    }
+    await chrome.storage.local.set({ campaignStop: false });
+    log(`Local start “${settings.keyword}”…`);
+    const res = await sendToTab({ type: "FM_START_CAMPAIGN", settings });
+    log(res?.reason === "started" ? "Campaign running in the tab." : res);
+  } catch (e) {
+    log(String(e.message || e));
+  }
+});
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === "FM_CAMPAIGN_LOG") {
+    log(msg.text || msg);
+  }
+});
+
+loadSettings().catch((e) => log(String(e)));

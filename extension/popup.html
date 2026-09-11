@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FM Outreach</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Freelancermap Worker</h1>
+      <p class="sub">
+        Pair this Chrome profile with Bot 1/2/3. Jobs are created on the VPS
+        dashboard; this extension claims and runs them.
+      </p>
+    </header>
+
+    <label class="field">
+      <span>Bot ID</span>
+      <select id="botId">
+        <option value="1">Bot 1</option>
+        <option value="2">Bot 2</option>
+        <option value="3">Bot 3</option>
+      </select>
+    </label>
+
+    <label class="field">
+      <span>Control API URL</span>
+      <input
+        id="apiBaseUrl"
+        type="url"
+        placeholder="https://your-vps.example.com:8090"
+      />
+    </label>
+
+    <label class="field">
+      <span>Bot token</span>
+      <input id="botToken" type="password" placeholder="BOT_N_TOKEN" autocomplete="off" />
+    </label>
+
+    <label class="row">
+      <input id="enabled" type="checkbox" checked />
+      <span>Poll dashboard for jobs</span>
+    </label>
+
+    <details class="advanced">
+      <summary>Local campaign (manual, optional)</summary>
+      <label class="field">
+        <span>Search keyword</span>
+        <input id="keyword" type="text" placeholder="e.g. FastAPI Next.js" />
+      </label>
+      <div class="grid2">
+        <label class="field">
+          <span>Min interval (sec)</span>
+          <input id="minInterval" type="number" min="10" step="1" value="60" />
+        </label>
+        <label class="field">
+          <span>Max interval (sec)</span>
+          <input id="maxInterval" type="number" min="10" step="1" value="180" />
+        </label>
+      </div>
+      <label class="field">
+        <span>Max freelancers</span>
+        <input id="limit" type="number" min="1" max="200" step="1" value="10" />
+      </label>
+      <label class="row">
+        <input id="dryRun" type="checkbox" checked />
+        <span>Dry run</span>
+      </label>
+      <div class="actions">
+        <button id="btnLocalStart" type="button" class="ghost">Start local</button>
+        <button id="btnStop" type="button" class="ghost danger">Stop</button>
+      </div>
+    </details>
+
+    <div class="actions">
+      <button id="btnSave" type="button" class="primary">Save &amp; connect</button>
+    </div>
+
+    <pre id="log" class="log">Configure Bot ID + API URL + token, then Save.</pre>
+    <script src="popup.js"></script>
+  </body>
+</html>

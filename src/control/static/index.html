@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FM Bot Control</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="top">
+        <div>
+          <h1>Freelancermap Control</h1>
+          <p class="muted">3 independent outreach bots · extension workers</p>
+        </div>
+        <div class="auth">
+          <input id="apiToken" type="password" placeholder="Dashboard API token" />
+          <button id="btnSaveToken" type="button">Save</button>
+        </div>
+      </header>
+
+      <nav class="tabs" id="botTabs">
+        <button type="button" data-bot="1" class="tab active">Bot 1</button>
+        <button type="button" data-bot="2" class="tab">Bot 2</button>
+        <button type="button" data-bot="3" class="tab">Bot 3</button>
+      </nav>
+
+      <section class="panel" id="panelStatus">
+        <h2>Bot status</h2>
+        <div class="card" id="botCard">Loading…</div>
+        <div class="row-actions">
+          <button id="btnRefresh" type="button" class="ghost">Refresh</button>
+          <button id="btnStop" type="button" class="danger">Stop current job</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Outreach — create job</h2>
+        <div class="grid2">
+          <label>Keyword<input id="keyword" type="text" placeholder="FastAPI Next.js" /></label>
+          <label>Max freelancers<input id="limit" type="number" value="10" min="1" max="500" /></label>
+          <label>Min interval (sec)<input id="minInterval" type="number" value="60" min="10" /></label>
+          <label>Max interval (sec)<input id="maxInterval" type="number" value="180" min="10" /></label>
+        </div>
+        <label class="check"><input id="dryRun" type="checkbox" checked /> Dry run (don’t send)</label>
+        <button id="btnStart" type="button" class="primary">Start job for this bot</button>
+      </section>
+
+      <section class="panel">
+        <h2>Job log</h2>
+        <pre id="jobLog" class="log">No events yet.</pre>
+      </section>
+
+      <section class="panel">
+        <h2>Pipeline</h2>
+        <p class="muted">Applicants for this bot (assessment stages — scaffold).</p>
+        <div id="pipeline" class="table"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Duplicates / contacts</h2>
+        <div class="row-actions">
+          <input id="contactQ" type="text" placeholder="Search name or profile key" />
+          <button id="btnSearchContacts" type="button" class="ghost">Search</button>
+        </div>
+        <div id="contacts" class="table"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Settings</h2>
+        <label>GitHub unlock after N messages
+          <input id="githubAfter" type="number" min="1" max="100" value="20" />
+        </label>
+        <label>Max messages per applicant
+          <input id="maxMessages" type="number" min="5" max="100" value="30" />
+        </label>
+        <button id="btnSaveSettings" type="button" class="ghost">Save settings</button>
+      </section>
+    </div>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

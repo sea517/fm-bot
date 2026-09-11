@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "Freelancermap Outreach",
+  "version": "0.2.0",
+  "description": "Worker for Freelancermap Control dashboard — claim jobs and send Contact DMs.",
+  "action": {
+    "default_title": "Freelancermap Outreach",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["storage", "activeTab", "scripting", "tabs", "alarms"],
+  "host_permissions": [
+    "https://www.freelancermap.com/*",
+    "https://www.freelancermap.de/*",
+    "https://*.supabase.co/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.freelancermap.com/*",
+        "https://www.freelancermap.de/*"
+      ],
+      "js": [
+        "shared/templates.js",
+        "shared/supabase.js",
+        "content/outreach.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+# Slim deps for Vercel Control API (dashboard + extension workers).
+# Full bot stack stays in requirements.txt for local/VPS Playwright runs.
+fastapi>=0.109.0
+uvicorn>=0.27.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+pydantic>=2.0.0

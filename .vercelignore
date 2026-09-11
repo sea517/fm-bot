@@ -1,0 +1,16 @@
+# Keep the Vercel function small — exclude local bot / browser artifacts.
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+.git
+data/
+**/browser_session/**
+.env
+.env.*
+!.env.example
+*.db
+.cursor
+docs/
+extension/
