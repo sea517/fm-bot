@@ -48,7 +48,7 @@ function activityBadge(running) {
 
 /** Job still owns the bot (show Stop). */
 function isJobRunning(job) {
-  return job && ["queued", "running"].includes(job.status);
+  return job && ["queued", "running", "cancel_requested"].includes(job.status);
 }
 
 function setRunControls(running) {

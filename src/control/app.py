@@ -124,6 +124,59 @@ def get_bot(bot_id: int, authorization: str | None = Header(default=None)) -> di
 # ----- Jobs -----
 
 
+def _finalize_cancel_requested(bot_id: int) -> int:
+    """Close jobs stuck in cancel_requested so Start is not blocked while UI shows rest."""
+    stuck = sb_get(
+        "outreach_jobs",
+        params={
+            "bot_id": f"eq.{bot_id}",
+            "status": "eq.cancel_requested",
+            "select": "id",
+            "limit": "20",
+        },
+    )
+    if not stuck:
+        return 0
+    now = _now()
+    for job in stuck:
+        sb_patch(
+            "outreach_jobs",
+            match={"id": f"eq.{job['id']}"},
+            row={
+                "status": "stopped",
+                "finished_at": now,
+                "updated_at": now,
+            },
+            return_representation=False,
+        )
+        sb_insert(
+            "job_events",
+            {
+                "job_id": job["id"],
+                "bot_id": bot_id,
+                "level": "warn",
+                "message": "Auto-closed stuck cancel_requested job",
+            },
+            return_representation=False,
+        )
+    bots = sb_get(
+        "bots",
+        params={"id": f"eq.{bot_id}", "select": "current_job_id", "limit": "1"},
+    )
+    if bots and bots[0].get("current_job_id") in {j["id"] for j in stuck}:
+        sb_patch(
+            "bots",
+            match={"id": f"eq.{bot_id}"},
+            row={
+                "status": "online",
+                "current_job_id": None,
+                "updated_at": now,
+            },
+            return_representation=False,
+        )
+    return len(stuck)
+
+
 @app.get("/api/bots/{bot_id}/jobs")
 def list_jobs(
     bot_id: int,
@@ -155,12 +208,14 @@ def create_job(
     if bot_id not in (1, 2, 3):
         raise HTTPException(404)
     _require_supabase()
-    # Only one active job per bot
+    # Half-dead stop states must not block a new Start.
+    _finalize_cancel_requested(bot_id)
+    # Only one truly active job per bot
     active = sb_get(
         "outreach_jobs",
         params={
             "bot_id": f"eq.{bot_id}",
-            "status": "in.(queued,running,cancel_requested)",
+            "status": "in.(queued,running)",
             "select": "id,status",
             "limit": "1",
         },
@@ -363,11 +418,13 @@ def active_job(
 ) -> dict[str, Any]:
     auth.require_bot(bot_id, authorization)
     _require_supabase()
+    # Stuck cancel_requested with no worker finishing: treat as stopped.
+    _finalize_cancel_requested(bot_id)
     rows = sb_get(
         "outreach_jobs",
         params={
             "bot_id": f"eq.{bot_id}",
-            "status": "in.(running,cancel_requested)",
+            "status": "eq.running",
             "select": "*",
             "order": "started_at.desc",
             "limit": "1",
