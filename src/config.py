@@ -69,9 +69,9 @@ GEMINI_MODEL = _optional("GEMINI_MODEL", "gemini-3.6-flash")
 # OpenRouter (OpenAI-compatible). Used automatically when a key is present,
 # unless AI_PROVIDER is set explicitly to "gemini" or "openrouter".
 OPENROUTER_API_KEY = _optional("OPENROUTER_API_KEY").strip().strip('"').strip("'")
-OPENROUTER_MODEL = _optional("OPENROUTER_MODEL", "google/gemini-2.5-flash")
+OPENROUTER_MODEL = _optional("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731")
 OPENROUTER_BASE_URL = _optional("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-AI_PROVIDER = _optional("AI_PROVIDER").strip().lower()
+AI_PROVIDER = _optional("AI_PROVIDER", "openrouter").strip().lower()
 
 
 def active_ai_provider() -> str:

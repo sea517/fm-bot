@@ -135,3 +135,12 @@ alter table public.outreach_jobs
   add column if not exists subject text not null default '';
 alter table public.outreach_jobs
   add column if not exists message_body text not null default '';
+
+alter table public.fm_applicants
+  add column if not exists github_username text;
+alter table public.fm_applicants
+  add column if not exists rejection_due_at timestamptz;
+alter table public.fm_applicants
+  add column if not exists last_freelancer_message_at timestamptz;
+alter table public.fm_applicants
+  add column if not exists last_bot_message_at timestamptz;

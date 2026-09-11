@@ -180,17 +180,18 @@ async function refreshPipeline() {
   const rows = await api(`/api/bots/${state.botId}/applicants`);
   $("pipeline").innerHTML = rows.length
     ? rows
-        .map(
-          (a) =>
-            `<div class="row"><div>${a.display_name || "—"} · ${a.stage}</div><div>${a.status}</div></div>`
-        )
+        .map((a) => {
+          const gh = a.github_username ? ` · gh:@${a.github_username}` : "";
+          const n = a.message_count != null ? ` · ${a.message_count} msgs` : "";
+          return `<div class="row"><div>${a.display_name || "—"} · <strong>${a.stage}</strong>${n}${gh}</div><div>${a.status}</div></div>`;
+        })
         .join("")
     : `<div class="muted">No applicants yet for Bot ${state.botId}.</div>`;
 }
 
 async function refreshSettings() {
   const s = await api(`/api/bots/${state.botId}/settings`);
-  $("githubAfter").value = s.github_unlock_after_messages ?? 20;
+  $("githubAfter").value = s.github_unlock_after_messages ?? 24;
   $("maxMessages").value = s.max_messages_per_applicant ?? 30;
 }
 

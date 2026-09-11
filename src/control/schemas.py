@@ -64,11 +64,33 @@ class ContactUpsertBody(BaseModel):
     stage: str | None = None
 
 
+class ChatTurnBody(BaseModel):
+    conversation_id: str = Field(min_length=1, max_length=120)
+    message: str = Field(min_length=1, max_length=12000)
+    display_name: str | None = None
+    profile_key: str | None = None
+
+    @field_validator("conversation_id", "message", "display_name", "profile_key")
+    @classmethod
+    def strip_optional(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+
+class ApplicantUpsertBody(BaseModel):
+    conversation_id: str | None = None
+    profile_key: str | None = None
+    display_name: str | None = None
+    stage: str = "outreach_sent"
+
+
 class BotSettingsBody(BaseModel):
     outreach_subject: str | None = None
     outreach_body: str | None = None
-    github_unlock_after_messages: int | None = Field(default=None, ge=1, le=100)
-    max_messages_per_applicant: int | None = Field(default=None, ge=5, le=100)
+    github_unlock_after_messages: int | None = Field(default=None, ge=8, le=30)
+    max_messages_per_applicant: int | None = Field(default=None, ge=10, le=40)
 
 
 class BotSettings(BaseModel):
@@ -76,6 +98,6 @@ class BotSettings(BaseModel):
         "FastAPI/Next.js billing module – remote contract, ~1 month"
     )
     outreach_body: str = ""
-    github_unlock_after_messages: int = 20
+    github_unlock_after_messages: int = 24
     max_messages_per_applicant: int = 30
     updated_at: datetime | None = None

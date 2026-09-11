@@ -63,17 +63,17 @@
 
       <section class="panel">
         <h2>Pipeline</h2>
-        <p class="muted">Applicants for this bot (assessment stages — scaffold).</p>
+        <p class="muted">Assessment chat → GitHub invite → assignment → scheduled rejection.</p>
         <div id="pipeline" class="table"></div>
       </section>
 
       <section class="panel">
         <h2>Settings</h2>
-        <label>GitHub unlock after N messages
-          <input id="githubAfter" type="number" min="1" max="100" value="20" />
+        <label>GitHub unlock after N bot messages (20–30)
+          <input id="githubAfter" type="number" min="8" max="30" value="24" />
         </label>
         <label>Max messages per applicant
-          <input id="maxMessages" type="number" min="5" max="100" value="30" />
+          <input id="maxMessages" type="number" min="10" max="40" value="30" />
         </label>
         <button id="btnSaveSettings" type="button" class="ghost">Save settings</button>
       </section>

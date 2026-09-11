@@ -102,61 +102,39 @@ def _generate_openrouter(system: str, user: str, max_tokens: int = MAX_TOKENS) -
         raise LLMError("OPENROUTER_API_KEY is required")
 
     try:
-        response = requests.post(
-            f"{OPENROUTER_BASE_URL.rstrip('/')}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-                # OpenRouter attribution headers (optional but recommended)
+        from openai import OpenAI
+
+        client = OpenAI(
+            api_key=OPENROUTER_API_KEY,
+            base_url=OPENROUTER_BASE_URL.rstrip("/"),
+            default_headers={
                 "HTTP-Referer": "https://kontrora.com",
                 "X-Title": "Kontrora recruiting bot",
             },
-            json={
-                "model": OPENROUTER_MODEL,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "max_tokens": max_tokens,
-                "temperature": 0.2,
-                # Keep reasoning tiny so classification tokens are not eaten.
+        )
+        response = client.chat.completions.create(
+            model=OPENROUTER_MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=max_tokens,
+            temperature=0.35,
+            extra_body={
                 "reasoning": {"effort": "low", "exclude": True},
                 "include_reasoning": False,
             },
-            timeout=REQUEST_TIMEOUT,
         )
-    except requests.RequestException as e:
+    except Exception as e:
         raise LLMError(f"OpenRouter request failed: {e}") from e
 
-    if response.status_code != 200:
-        raise LLMError(
-            f"OpenRouter HTTP {response.status_code}: {response.text[:400]}"
-        )
-
-    try:
-        payload = response.json()
-    except ValueError as e:
-        raise LLMError(f"OpenRouter returned non-JSON: {response.text[:200]}") from e
-
-    if "error" in payload and not payload.get("choices"):
-        raise LLMError(f"OpenRouter error: {str(payload['error'])[:400]}")
-
-    choices = payload.get("choices") or []
-    if not choices:
-        raise LLMError(f"OpenRouter returned no choices: {str(payload)[:300]}")
-
-    text = (choices[0].get("message") or {}).get("content") or ""
-    text = strip_reasoning(str(text))
+    choice = (response.choices or [None])[0]
+    if not choice:
+        raise LLMError("OpenRouter returned no choices")
+    text = strip_reasoning(str(choice.message.content or ""))
     if not text:
-        finish = choices[0].get("finish_reason")
-        usage = payload.get("usage") or {}
-        reasoning_tokens = (usage.get("completion_tokens_details") or {}).get(
-            "reasoning_tokens"
-        )
         raise LLMError(
-            f"OpenRouter returned an empty message (finish_reason={finish}, "
-            f"max_tokens={max_tokens}, reasoning_tokens={reasoning_tokens}) — "
-            "the model likely spent the whole budget on reasoning"
+            f"OpenRouter returned an empty message (finish_reason={choice.finish_reason})"
         )
     return text
 

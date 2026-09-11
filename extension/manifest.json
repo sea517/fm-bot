@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Freelancermap Outreach",
-  "version": "0.2.1",
-  "description": "Worker for Freelancermap Control dashboard — claim jobs and send Contact DMs.",
+  "version": "0.3.0",
+  "description": "Worker for Freelancermap Control — outreach DMs + assessment chat replies.",
   "action": {
     "default_title": "Freelancermap Outreach",
     "default_popup": "popup.html",
@@ -37,7 +37,8 @@
       "js": [
         "shared/templates.js",
         "shared/supabase.js",
-        "content/outreach.js"
+        "content/outreach.js",
+        "content/chat.js"
       ],
       "run_at": "document_idle"
     }

@@ -12,11 +12,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from src.assessment.engine import process_freelancer_message
 from src.control import auth
 from src.control.db import sb_get, sb_insert, sb_patch, sb_upsert, supabase_ok
 from src.control.schemas import (
+    ApplicantUpsertBody,
     BotSettings,
     BotSettingsBody,
+    ChatTurnBody,
     ContactUpsertBody,
     CreateJobBody,
     HeartbeatBody,
@@ -676,6 +679,341 @@ def list_applicants(
             "limit": "100",
         },
     )
+
+
+def _find_applicant(
+    bot_id: int,
+    conversation_id: str | None,
+    profile_key: str | None,
+    display_name: str | None = None,
+) -> dict | None:
+    if conversation_id:
+        rows = sb_get(
+            "fm_applicants",
+            params={
+                "bot_id": f"eq.{bot_id}",
+                "conversation_id": f"eq.{conversation_id}",
+                "select": "*",
+                "limit": "1",
+            },
+        )
+        if rows:
+            return rows[0]
+    if profile_key:
+        rows = sb_get(
+            "fm_applicants",
+            params={
+                "bot_id": f"eq.{bot_id}",
+                "profile_key": f"eq.{profile_key}",
+                "select": "*",
+                "limit": "1",
+            },
+        )
+        if rows:
+            return rows[0]
+    if display_name and display_name.strip():
+        rows = sb_get(
+            "fm_applicants",
+            params={
+                "bot_id": f"eq.{bot_id}",
+                "display_name": f"ilike.{display_name.strip()}",
+                "select": "*",
+                "order": "updated_at.desc",
+                "limit": "1",
+            },
+        )
+        if rows:
+            return rows[0]
+    return None
+
+
+@app.post("/api/bots/{bot_id}/applicants/upsert")
+def upsert_applicant(
+    bot_id: int,
+    body: ApplicantUpsertBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Create/update applicant after outreach DM (extension)."""
+    auth.require_bot(bot_id, authorization)
+    if bot_id not in (1, 2, 3):
+        raise HTTPException(404)
+    _require_supabase()
+    if not body.conversation_id and not body.profile_key:
+        raise HTTPException(400, "conversation_id or profile_key required")
+    existing = _find_applicant(
+        bot_id, body.conversation_id, body.profile_key, body.display_name
+    )
+    now = _now()
+    if existing:
+        patch = {"updated_at": now}
+        if body.display_name:
+            patch["display_name"] = body.display_name
+        if body.conversation_id and not existing.get("conversation_id"):
+            patch["conversation_id"] = body.conversation_id
+        if body.profile_key and not existing.get("profile_key"):
+            patch["profile_key"] = body.profile_key
+        rows = sb_patch(
+            "fm_applicants",
+            match={"id": f"eq.{existing['id']}"},
+            row=patch,
+        )
+        return rows[0] if rows else existing
+    rows = sb_insert(
+        "fm_applicants",
+        {
+            "bot_id": bot_id,
+            "conversation_id": body.conversation_id,
+            "profile_key": body.profile_key,
+            "display_name": body.display_name,
+            "stage": body.stage or "outreach_sent",
+            "status": "active",
+            "message_count": 0,
+            "github_unlocked": False,
+            "updated_at": now,
+        },
+    )
+    return rows[0]
+
+
+@app.post("/api/bots/{bot_id}/chat/turn")
+def chat_turn(
+    bot_id: int,
+    body: ChatTurnBody,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Extension: report a freelancer message and receive the next bot reply."""
+    auth.require_bot(bot_id, authorization)
+    if bot_id not in (1, 2, 3):
+        raise HTTPException(404)
+    _require_supabase()
+    if not body.conversation_id or not body.message:
+        raise HTTPException(400, "conversation_id and message required")
+
+    settings = _bot_settings(bot_id)
+    applicant = _find_applicant(
+        bot_id, body.conversation_id, body.profile_key, body.display_name
+    )
+    now = _now()
+    if not applicant:
+        created = sb_insert(
+            "fm_applicants",
+            {
+                "bot_id": bot_id,
+                "conversation_id": body.conversation_id,
+                "profile_key": body.profile_key,
+                "display_name": body.display_name,
+                "stage": "assessment_chat",
+                "status": "active",
+                "message_count": 0,
+                "github_unlocked": False,
+                "updated_at": now,
+                "last_freelancer_message_at": now,
+            },
+        )
+        applicant = created[0]
+    else:
+        link_patch: dict[str, Any] = {
+            "display_name": body.display_name or applicant.get("display_name"),
+            "last_freelancer_message_at": now,
+            "updated_at": now,
+        }
+        if body.conversation_id and not applicant.get("conversation_id"):
+            link_patch["conversation_id"] = body.conversation_id
+        if body.profile_key and not applicant.get("profile_key"):
+            link_patch["profile_key"] = body.profile_key
+        sb_patch(
+            "fm_applicants",
+            match={"id": f"eq.{applicant['id']}"},
+            row=link_patch,
+            return_representation=False,
+        )
+        applicant = {**applicant, **link_patch}
+
+    # Skip duplicate freelancer messages (extension re-poll of same inbox line)
+    prior = sb_get(
+        "fm_messages",
+        params={
+            "applicant_id": f"eq.{applicant['id']}",
+            "role": "eq.freelancer",
+            "select": "id,body",
+            "order": "id.desc",
+            "limit": "1",
+        },
+    )
+    if prior and (prior[0].get("body") or "").strip() == body.message.strip():
+        return {
+            "applicant_id": applicant["id"],
+            "reply": None,
+            "stage": applicant.get("stage"),
+            "message_count": applicant.get("message_count"),
+            "github_unlocked": applicant.get("github_unlocked"),
+            "github_username": applicant.get("github_username"),
+            "invite_ok": None,
+            "rejection_due_at": applicant.get("rejection_due_at"),
+            "action": "duplicate",
+        }
+
+    sb_insert(
+        "fm_messages",
+        {
+            "applicant_id": applicant["id"],
+            "role": "freelancer",
+            "body": body.message,
+        },
+        return_representation=False,
+    )
+    history = sb_get(
+        "fm_messages",
+        params={
+            "applicant_id": f"eq.{applicant['id']}",
+            "select": "role,body,created_at",
+            "order": "id.asc",
+            "limit": "80",
+        },
+    )
+    result = process_freelancer_message(
+        applicant=applicant,
+        messages=history,
+        freelancer_text=body.message,
+        unlock_after=settings.github_unlock_after_messages,
+        max_messages=settings.max_messages_per_applicant,
+    )
+    patch: dict[str, Any] = {
+        "stage": result.stage,
+        "message_count": result.message_count,
+        "github_unlocked": result.github_unlocked,
+        "updated_at": now,
+    }
+    if result.github_username:
+        patch["github_username"] = result.github_username
+    if result.rejection_due_at:
+        patch["rejection_due_at"] = result.rejection_due_at
+    if result.reply:
+        patch["last_bot_message_at"] = now
+        sb_insert(
+            "fm_messages",
+            {
+                "applicant_id": applicant["id"],
+                "role": "bot",
+                "body": result.reply,
+            },
+            return_representation=False,
+        )
+    sb_patch(
+        "fm_applicants",
+        match={"id": f"eq.{applicant['id']}"},
+        row=patch,
+        return_representation=False,
+    )
+    return {
+        "applicant_id": applicant["id"],
+        "reply": result.reply,
+        "stage": result.stage,
+        "message_count": result.message_count,
+        "github_unlocked": result.github_unlocked,
+        "github_username": result.github_username,
+        "invite_ok": result.invite_ok,
+        "rejection_due_at": result.rejection_due_at,
+        "action": result.action,
+    }
+
+
+@app.get("/api/bots/{bot_id}/chat/due")
+def chat_due(
+    bot_id: int,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Applicants with due rejection messages (1–2 days after assignment received)."""
+    auth.require_bot(bot_id, authorization)
+    _require_supabase()
+    rows = sb_get(
+        "fm_applicants",
+        params={
+            "bot_id": f"eq.{bot_id}",
+            "stage": "eq.rejection_scheduled",
+            "select": "*",
+            "order": "rejection_due_at.asc",
+            "limit": "50",
+        },
+    )
+    now = datetime.now(timezone.utc)
+    due: list[dict] = []
+    for row in rows:
+        raw = row.get("rejection_due_at")
+        if not raw:
+            continue
+        try:
+            due_dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if due_dt <= now:
+            due.append(row)
+    return {"applicants": due}
+
+
+@app.post("/api/bots/{bot_id}/chat/due/{applicant_id}")
+def chat_due_send(
+    bot_id: int,
+    applicant_id: int,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Generate the scheduled rejection reply for a due applicant."""
+    auth.require_bot(bot_id, authorization)
+    _require_supabase()
+    rows = sb_get(
+        "fm_applicants",
+        params={
+            "id": f"eq.{applicant_id}",
+            "bot_id": f"eq.{bot_id}",
+            "select": "*",
+            "limit": "1",
+        },
+    )
+    if not rows:
+        raise HTTPException(404, "applicant not found")
+    applicant = rows[0]
+    history = sb_get(
+        "fm_messages",
+        params={
+            "applicant_id": f"eq.{applicant_id}",
+            "select": "role,body,created_at",
+            "order": "id.asc",
+            "limit": "80",
+        },
+    )
+    result = process_freelancer_message(
+        applicant=applicant,
+        messages=history,
+        freelancer_text="",
+        unlock_after=_bot_settings(bot_id).github_unlock_after_messages,
+        max_messages=_bot_settings(bot_id).max_messages_per_applicant,
+    )
+    now = _now()
+    if result.reply:
+        sb_insert(
+            "fm_messages",
+            {"applicant_id": applicant_id, "role": "bot", "body": result.reply},
+            return_representation=False,
+        )
+    sb_patch(
+        "fm_applicants",
+        match={"id": f"eq.{applicant_id}"},
+        row={
+            "stage": result.stage,
+            "message_count": result.message_count,
+            "updated_at": now,
+            "last_bot_message_at": now if result.reply else applicant.get("last_bot_message_at"),
+            "status": "closed" if result.stage == "rejected" else applicant.get("status"),
+        },
+        return_representation=False,
+    )
+    return {
+        "applicant_id": applicant_id,
+        "reply": result.reply,
+        "stage": result.stage,
+        "action": result.action,
+        "conversation_id": applicant.get("conversation_id"),
+    }
 
 
 @app.get("/api/bots/{bot_id}/settings")

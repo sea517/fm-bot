@@ -1,7 +1,9 @@
-/* Background: heartbeat + claim outreach jobs from Control API. */
+/* Background: heartbeat + claim outreach jobs + assessment inbox chat. */
 
 const DEFAULT_API_BASE_URL = "https://fm-bot.vercel.app";
 const POLL_MS = 12000;
+const CHAT_POLL_EVERY = 3; // every N poll cycles (~36s) run an inbox pass
+let pollCycle = 0;
 
 async function settings() {
   const s = await chrome.storage.sync.get({
@@ -53,16 +55,31 @@ async function heartbeat(status = "online", last_error = null) {
   }
 }
 
-async function ensureFreelancerTab() {
+async function ensureFreelancerTab(preferMessages = false) {
   const tabs = await chrome.tabs.query({
     url: ["https://www.freelancermap.com/*", "https://www.freelancermap.de/*"],
   });
+  if (preferMessages) {
+    const msgTab = tabs.find((t) =>
+      /pobox|messages|conversation|chat/i.test(t.url || "")
+    );
+    if (msgTab) return msgTab;
+  }
   if (tabs[0]) return tabs[0];
   return chrome.tabs.create({
-    url: "https://www.freelancermap.com/freelancer",
+    url: preferMessages
+      ? "https://www.freelancermap.com/pobox"
+      : "https://www.freelancermap.com/freelancer",
     active: true,
   });
 }
+
+const CONTENT_SCRIPTS = [
+  "shared/templates.js",
+  "shared/supabase.js",
+  "content/outreach.js",
+  "content/chat.js",
+];
 
 async function sendToTab(tabId, payload) {
   try {
@@ -70,11 +87,7 @@ async function sendToTab(tabId, payload) {
   } catch (_e) {
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: [
-        "shared/templates.js",
-        "shared/supabase.js",
-        "content/outreach.js",
-      ],
+      files: CONTENT_SCRIPTS,
     });
     return chrome.tabs.sendMessage(tabId, payload);
   }
@@ -93,7 +106,7 @@ async function reportEvent(botId, jobId, message, level = "info") {
 
 async function runClaimedJob(job) {
   const s = await settings();
-  const tab = await ensureFreelancerTab();
+  const tab = await ensureFreelancerTab(false);
   await chrome.tabs.update(tab.id, { active: true });
   await reportEvent(s.botId, job.id, `Starting campaign keyword=${job.keyword}`);
 
@@ -111,7 +124,6 @@ async function runClaimedJob(job) {
     jobId: job.id,
   };
 
-  // Store cancel check helpers for content script
   await chrome.storage.local.set({
     campaignStop: false,
     activeJobId: job.id,
@@ -124,9 +136,31 @@ async function runClaimedJob(job) {
     settings: campaignSettings,
   });
 
-  // Poll until content script finishes (it returns started immediately)
-  // Content script will call finish via runtime message
   console.info("campaign start ack", result);
+}
+
+async function runInboxChatPass() {
+  const s = await settings();
+  if (!s.enabled || !s.botToken) return;
+  const { activeJobId } = await chrome.storage.local.get({ activeJobId: null });
+  if (activeJobId) return; // don't interrupt outreach
+
+  try {
+    const tab = await ensureFreelancerTab(true);
+    if (!/pobox|messages|conversation|chat/i.test(tab.url || "")) {
+      await chrome.tabs.update(tab.id, {
+        url: "https://www.freelancermap.com/pobox",
+        active: false,
+      });
+      await new Promise((r) => setTimeout(r, 2500));
+    }
+    const result = await sendToTab(tab.id, { type: "FM_CHAT_PASS" });
+    if (result?.results?.length) {
+      console.info("inbox chat pass", result);
+    }
+  } catch (e) {
+    console.warn("inbox chat pass failed", e);
+  }
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -189,6 +223,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     });
     return true;
   }
+  if (msg?.type === "FM_APPLICANT_UPSERT") {
+    settings().then(async (s) => {
+      try {
+        await api(`/api/bots/${s.botId}/applicants/upsert`, {
+          method: "POST",
+          body: msg.applicant,
+        });
+      } catch (e) {
+        console.warn(e);
+      }
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
   if (msg?.type === "FM_CONTACT_CHECK") {
     settings().then(async (s) => {
       try {
@@ -205,6 +253,51 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     });
     return true;
   }
+  if (msg?.type === "FM_CHAT_TURN") {
+    settings().then(async (s) => {
+      try {
+        const data = await api(`/api/bots/${s.botId}/chat/turn`, {
+          method: "POST",
+          body: {
+            conversation_id: String(msg.conversation_id),
+            message: msg.message,
+            display_name: msg.display_name || null,
+            profile_key: msg.profile_key || null,
+          },
+        });
+        sendResponse(data);
+      } catch (e) {
+        sendResponse({ reply: null, error: String(e), action: "error" });
+      }
+    });
+    return true;
+  }
+  if (msg?.type === "FM_CHAT_DUE") {
+    settings().then(async (s) => {
+      try {
+        const due = await api(`/api/bots/${s.botId}/chat/due`);
+        const items = [];
+        for (const row of due?.applicants || []) {
+          const sent = await api(`/api/bots/${s.botId}/chat/due/${row.id}`, {
+            method: "POST",
+          });
+          if (sent?.reply) {
+            items.push({
+              applicant_id: row.id,
+              conversation_id: row.conversation_id || sent.conversation_id,
+              reply: sent.reply,
+              stage: sent.stage,
+              action: sent.action,
+            });
+          }
+        }
+        sendResponse({ items });
+      } catch (e) {
+        sendResponse({ items: [], error: String(e) });
+      }
+    });
+    return true;
+  }
   return false;
 });
 
@@ -213,8 +306,8 @@ async function poll() {
   if (!s.enabled || !s.apiBaseUrl || !s.botToken) return;
 
   await heartbeat("online");
+  pollCycle += 1;
 
-  // Stop campaign if dashboard ended the job
   try {
     const active = await api(`/api/bots/${s.botId}/jobs/active`);
     const job = active?.job;
@@ -238,12 +331,18 @@ async function poll() {
     }
 
     if (activeJobId || job?.status === "running") {
-      return; // already running
+      return; // already running outreach
     }
 
     const claimed = await api(`/api/bots/${s.botId}/jobs/claim`, { method: "POST" });
     if (claimed?.job) {
       await runClaimedJob(claimed.job);
+      return;
+    }
+
+    // No outreach job — periodically process inbox replies
+    if (pollCycle % CHAT_POLL_EVERY === 0) {
+      await runInboxChatPass();
     }
   } catch (e) {
     console.warn("poll error", e);

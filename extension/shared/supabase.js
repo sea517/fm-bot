@@ -81,6 +81,15 @@
             stage: "outreach_dm_sent",
           },
         });
+        await chrome.runtime.sendMessage({
+          type: "FM_APPLICANT_UPSERT",
+          applicant: {
+            profile_key: slug || "unknown",
+            display_name: name || null,
+            conversation_id: null,
+            stage: "outreach_sent",
+          },
+        });
         return true;
       } catch (_e) {
         return false;
