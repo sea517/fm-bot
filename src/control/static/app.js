@@ -40,6 +40,12 @@ function statusBadge(status) {
   return `<span class="badge ${s}">${s}</span>`;
 }
 
+function activityBadge(running) {
+  return running
+    ? `<span class="badge running">running</span>`
+    : `<span class="badge rest">rest</span>`;
+}
+
 /** Job still owns the bot (show Stop). */
 function isJobRunning(job) {
   return job && ["queued", "running"].includes(job.status);
@@ -151,7 +157,7 @@ async function refreshBot() {
       ? `Last: #${bot.current_job.id} [${bot.current_job.status}]`
       : "No current job";
   $("botCard").innerHTML =
-    `<div><strong>${bot.label || "Bot " + bot.id}</strong> ${statusBadge(bot.status)}</div>` +
+    `<div><strong>${bot.label || "Bot " + bot.id}</strong> ${statusBadge(bot.status)} ${activityBadge(running)}</div>` +
     `<div>Last heartbeat: ${bot.last_heartbeat_at || "—"}</div>` +
     `<div>${jobLine}</div>` +
     (bot.last_error ? `<div>Error: ${bot.last_error}</div>` : "");
