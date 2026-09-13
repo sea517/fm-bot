@@ -8,6 +8,7 @@ import secrets
 from dataclasses import dataclass
 
 from src.ai.llm import LLMError, generate
+from src.ai.ste100 import with_ste100
 from src.freelancermap.outreach_templates import first_name, render_outreach_body
 
 logger = logging.getLogger(__name__)
@@ -29,41 +30,94 @@ _ROLE_HINT = re.compile(
     re.I,
 )
 
-_DETAIL_SYSTEM = """You write one short phrase that explains why a recruiter is contacting a
-freelancer, grounded only in their technical experience from the freelancermap profile.
+_DETAIL_SYSTEM = with_ste100(
+    """You write one short phrase that explains why a recruiter contacts a
+freelancer. Use only their technical experience from the freelancermap profile.
 
 Rules:
 - Output ONLY the phrase (no quotes, no Hello, no full email).
-- 6–18 words. Natural English.
-- MUST be about technical skills, stack, role, domain, or past project work.
-- NEVER mention the person's name, city, country, or location.
-- Never invent employers, years, or skills not present in the facts.
-- Never use brackets or placeholders.
-- If facts are too thin, output exactly: your technical background"""
+- 6–18 words in ASD-STE100.
+- Write about technical skills, stack, role, domain, or project work.
+- Do not write the person name, city, country, or location.
+- Do not invent employers, years, or skills that are not in the facts.
+- Do not use brackets or placeholders.
+- If facts are thin, output exactly: your technical background"""
+)
 
-_BODY_SYSTEM = """You are a recruiter writing a one-off freelancermap contact DM.
+_BODY_SYSTEM = with_ste100(
+    """You are a recruiter. Write one freelancermap contact DM.
 
 You receive:
-1) A SHARED contact-form template (the offer / facts to keep)
-2) This freelancer's profile facts
+1) A SHARED contact-form template (keep the offer facts)
+2) This freelancer profile facts
 
 Write ONE complete DM body for this freelancer only.
 
 Hard rules:
-- Keep the same offer: project type, tech stack, remote, hours/month, start timing,
-  ask for availability, and the same sign-off name if present in the template.
-- Do NOT invent salary, company secrets, or skills the freelancer does not have.
-- Personalize the reason for writing using their technical experience / stack / role
-  (never their personal name as the reason, never city/country as the reason).
-- Greeting: use their first name when available (Hello FirstName,).
-- Vary wording, sentence order, and phrasing so this message is clearly NOT a
-  copy-paste of the template or of other DMs. Unique every time.
-- Professional, concise (roughly 80–180 words). Plain text only.
-- No markdown, no bullet lists unless the template uses them.
-- No placeholders, brackets, {name}, {detail}, or phrases like
-  "[specific detail from their profile]".
-- Output ONLY the message body — no subject line, no commentary, no quotes around it.
-"""
+- Keep the same offer: project type, tech stack, remote work, hours/month,
+  start time, ask for availability, and the same sign-off name from the template.
+- Do not invent salary, secrets, or skills that are not in the profile.
+- Give a technical reason to contact them (stack / role / project work).
+  Do not use their personal name or location as the reason.
+- Greeting: use their first name ONLY when it is a real given name.
+  If the first-name field is unknown/invalid, write exactly "Hello,".
+  Never write Hello Only, / Hello Remote, / Hello Full, / Hello Senior,.
+- Each DM must use different STE wording from the template (unique text).
+- Length: about 90–160 words. Plain text only.
+- ALWAYS complete the message: closing ask + sign-off (Best regards, + name).
+  Never stop in the middle of a sentence.
+- No markdown. No placeholders. No {name}/{detail}/brackets.
+- Output ONLY the finished message body."""
+)
+
+
+_BAD_GREETING = re.compile(
+    r"^(hello|hi|hey|dear)\s+"
+    r"(only|remote|available|verified|premium|contact|watchlist|full|senior|"
+    r"lead|principal|staff|junior|find|the|freelancer|profile|there)\b\s*,?\s*",
+    re.I,
+)
+
+_INCOMPLETE_TAIL = re.compile(
+    r"("
+    r"\bif you\s*$|"
+    r"\bif you'?re\s*$|"
+    r"\blet me know\s*$|"
+    r"\blooking forward\s*$|"
+    r"\bplease\s*$|"
+    r"\band\s*$|"
+    r"\bwith\s*$|"
+    r"\bto\s*$|"
+    r"\bfor\s*$|"
+    r"\bthe\s*$|"
+    r"\ba\s*$|"
+    r",\s*$|"
+    r"—\s*$|"
+    r"–\s*$"
+    r")",
+    re.I,
+)
+
+
+def body_looks_complete(body: str) -> bool:
+    """Reject mid-sentence cutoffs from max_tokens / model truncation."""
+    text = (body or "").strip()
+    if len(text) < 160:
+        return False
+    if _INCOMPLETE_TAIL.search(text):
+        return False
+    # Prefer a real closing
+    if re.search(
+        r"(best regards|kind regards|best wishes|cheers|thanks|thank you)\s*,?\s*\n+\s*\w+",
+        text,
+        re.I,
+    ):
+        return True
+    # Or at least ends on a finished sentence
+    if re.search(r"[.!?]\s*$", text):
+        return True
+    return False
+
 
 
 def _clip(text: str, n: int) -> str:
@@ -309,9 +363,13 @@ def body_is_valid(
     display_name: str = "",
 ) -> bool:
     text = (body or "").strip()
-    if len(text) < 120 or len(text) > 2500:
+    if len(text) < 160 or len(text) > 2500:
         return False
     if not re.match(r"^(hello|hi|hey|dear)\b", text, flags=re.I):
+        return False
+    if _BAD_GREETING.match(text):
+        return False
+    if not body_looks_complete(text):
         return False
     if "{" in text or "}" in text:
         return False
@@ -336,7 +394,7 @@ def body_is_valid(
                     hits += 1
         if hits < max(1, len(required) - 1):
             return False
-    if display_name:
+    if display_name and looks_like_person_name(display_name):
         for part in display_name.split():
             if len(part) >= 3 and re.search(
                 rf"\bas\s+{re.escape(part)}\b", text, re.I
@@ -351,8 +409,12 @@ def _clean_generated_body(raw: str, *, display_name: str, detail: str) -> str:
     text = re.sub(r"^(subject|body|message)\s*:\s*", "", text, flags=re.I).strip()
     text = re.sub(r"^```\w*\n?", "", text).strip()
     text = re.sub(r"\n?```$", "", text).strip()
+    # Fix bad UI-chrome greetings: "Hello Only," → "Hello," or real first name
     fn = first_name(display_name)
-    if fn and fn != "there" and re.match(r"^Hello\s*,", text, flags=re.I):
+    if _BAD_GREETING.match(text):
+        greet = f"Hello {fn}," if fn and fn != "there" else "Hello,"
+        text = _BAD_GREETING.sub(greet + "\n\n", text, count=1)
+    elif fn and fn != "there" and re.match(r"^Hello\s*,", text, flags=re.I):
         text = re.sub(r"^Hello\s*,", f"Hello {fn},", text, count=1, flags=re.I)
     return text.strip()
 
@@ -450,6 +512,12 @@ def generate_unique_outreach_dm(
 
     template = (message_body or "").strip() or fb.body
     fn = first_name(display_name)
+    greet_hint = (
+        fn if fn != "there" and looks_like_person_name(display_name)
+        else "(unknown — write exactly: Hello,)"
+    )
+    # Don't feed UI chrome like "Only remote" as a person name to the model
+    safe_name = display_name if looks_like_person_name(display_name) else ""
     nonce = secrets.token_hex(3)
 
     user = f"""Variation seed: {nonce} (use this only to diversify wording — do not print it)
@@ -460,8 +528,8 @@ SHARED contact-form template (keep the offer facts; rewrite the wording):
 ---
 
 Freelancer profile:
-- First name for greeting: {fn if fn != 'there' else '(unknown — use Hello,)'}
-- Full name (do not use as the contact reason): {_clip(display_name, 80) or '(unknown)'}
+- First name for greeting: {greet_hint}
+- Full name (do not use as the contact reason): {_clip(safe_name, 80) or '(unknown)'}
 - Job title / headline: {_clip(clean_title, 200) or '(none)'}
 - Skills: {_clip(skills, 400) or '(none)'}
 - Experience / about / projects: {_clip(experience, 1200) or '(none)'}
@@ -469,20 +537,21 @@ Freelancer profile:
 
 Subject line context (do not output the subject): {_clip(subject or project_hint, 200) or '(none)'}
 
-Write the unique DM body now:"""
+Write the COMPLETE unique DM body now in ASD-STE100
+(must include closing ask + Best regards / sign-off):"""
 
-    temps = (0.85, 0.95)
+    temps = (0.75, 0.9)
     for temp in temps:
         try:
-            raw = generate(_BODY_SYSTEM, user, max_tokens=700, temperature=temp)
+            raw = generate(_BODY_SYSTEM, user, max_tokens=1800, temperature=temp)
         except LLMError as e:
             logger.warning("Unique outreach body LLM failed (temp=%s): %s", temp, e)
             continue
-        body = _clean_generated_body(raw, display_name=display_name, detail=detail)
-        if body_is_valid(body, template=template, display_name=display_name):
+        body = _clean_generated_body(raw, display_name=safe_name or display_name, detail=detail)
+        if body_is_valid(body, template=template, display_name=safe_name):
             subj = (subject or "").strip() or None
             if subj and "{name}" in subj:
-                subj = subj.replace("{name}", fn)
+                subj = subj.replace("{name}", fn if fn != "there" else "there")
             return OutreachPersonalization(
                 detail=detail,
                 body=body,
@@ -490,10 +559,12 @@ Write the unique DM body now:"""
                 source="deepseek",
             )
         logger.info(
-            "Unique outreach body rejected (temp=%s, sim=%.2f, len=%d)",
+            "Unique outreach body rejected (temp=%s, sim=%.2f, len=%d, complete=%s, bad_hi=%s)",
             temp,
             similarity_ratio(body, template),
             len(body),
+            body_looks_complete(body),
+            bool(_BAD_GREETING.match(body or "")),
         )
 
     logger.warning("Falling back to filled template for %s", display_name or "?")

@@ -1,15 +1,15 @@
 /* global FMOutreach */
 (function () {
   const DEFAULT_SUBJECT =
-    "FastAPI/Next.js billing module – remote contract, ~1 month";
+    "FastAPI/Next.js billing module – remote contract, about 1 month";
 
   const DEFAULT_BODY = `Hello {name},
 
-Your profile came up in my search on freelancermap — specifically {detail} — so I wanted to send this your way.
+I found your profile on freelancermap. Your work with {detail} is relevant to this role.
 
-We're hiring a contractor to build the billing and revenue layer of a live multi-tenant PSA platform (FastAPI, Next.js, PostgreSQL, Stripe). Remote, ~80–100 hours/month, starting Oct 1st.
+We need a contractor for the billing and revenue layer of a live multi-tenant PSA platform. The stack is FastAPI, Next.js, PostgreSQL, and Stripe. The work is remote. Plan for about 80 to 100 hours each month. Start date is 1 October.
 
-The project brief is attached. If you're open to it, reply with your availability and we'll arrange a technical conversation.
+The project brief is attached. If you can do this work, reply with your availability. Then we can set a technical call.
 
 Best regards,
 David
@@ -21,14 +21,41 @@ David
   const ROLE_HINT =
     /\b(senior|lead|engineer|developer|architect|consultant|manager|designer|devops|backend|frontend|full[\s-]?stack|scientist|analyst|software|python|java|react|fastapi|django|next\.?js|node|cloud|data|mobile)\b/i;
 
+  const NAME_BLOCKED = new Set([
+    "full",
+    "senior",
+    "lead",
+    "principal",
+    "staff",
+    "junior",
+    "only",
+    "remote",
+    "available",
+    "verified",
+    "premium",
+    "contact",
+    "watchlist",
+    "find",
+    "the",
+    "freelancer",
+    "profile",
+    "hello",
+    "dear",
+    "hi",
+    "hey",
+    "there",
+  ]);
+
   function firstName(fullName) {
     const parts = String(fullName || "")
       .trim()
       .split(/\s+/);
     const first = parts[0] || "";
-    // Avoid greetings like "Hello Full," from "Full Stack …" misread as name
-    if (ROLE_HINT.test(fullName || "") && parts.length <= 2) return "";
-    if (/^(full|senior|lead|principal|staff|junior)$/i.test(first)) return "";
+    if (!first) return "";
+    if (NAME_BLOCKED.has(first.toLowerCase())) return "";
+    if (ROLE_HINT.test(fullName || "") && parts.length <= 3) return "";
+    if (/only\s+remote|available/i.test(fullName || "")) return "";
+    if (!/^[A-Za-zÀ-ÖØ-öø-ÿ'’-]+$/.test(first)) return "";
     return first;
   }
 
@@ -38,9 +65,13 @@ David
       .trim();
     if (!s || s.length > 60) return false;
     if (ROLE_HINT.test(s) || /[|■▪]/.test(s)) return false;
+    if (/only\s+remote|^only\b|^remote\b|available|verified|premium|watchlist/i.test(s)) {
+      return false;
+    }
     if (/\d|[/\\|@]/.test(s)) return false;
     const parts = s.split(/\s+/);
     if (parts.length < 2 || parts.length > 4) return false;
+    if (parts.some((p) => NAME_BLOCKED.has(p.toLowerCase()))) return false;
     const caps = parts.filter((p) => /^[A-Z]/.test(p)).length;
     return caps >= parts.length - 1;
   }
@@ -123,11 +154,16 @@ David
   }
 
   function personalizeHello(body, fullName) {
+    let out = String(body || "");
+    // Strip UI-chrome greetings the model sometimes emits
+    out = out.replace(
+      /^(Hello|Hi|Hey|Dear)\s+(Only|Remote|Available|Verified|Premium|Contact|Watchlist|Full|Senior|Lead|Principal|Staff|Junior|Find|The|Freelancer|Profile|There)\b\s*,?\s*/i,
+      "Hello,\n\n"
+    );
     const name = firstName(fullName);
     if (!name) {
-      // Strip a bad "Hello Full," style greeting down to "Hello,"
-      return String(body || "").replace(
-        /^Hello\s+(Full|Senior|Lead|Principal|Staff|Junior)\b\s*,?/i,
+      return out.replace(
+        /^Hello\s+(Full|Senior|Lead|Principal|Staff|Junior|Only|Remote)\b\s*,?/i,
         "Hello,"
       );
     }
@@ -135,11 +171,11 @@ David
       new RegExp(
         `^Hello\\s+${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
         "i"
-      ).test(body)
+      ).test(out)
     ) {
-      return body;
+      return out;
     }
-    return body.replace(/^Hello(\s*,)?/i, `Hello ${name}$1`);
+    return out.replace(/^(Hello|Hi)(\s*,)?/i, `Hello ${name}$2`);
   }
 
   function renderSubject(template, fullName) {

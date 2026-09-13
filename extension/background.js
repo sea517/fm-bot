@@ -322,25 +322,45 @@ async function startCampaignInTab(tab, job, { dry, skipSearch, resumeProfile, re
  */
 async function runInboxChatPass() {
   const s = await settings();
-  if (!s.enabled || !s.botToken) return;
-  const { chatPassBusy } = await chrome.storage.local.get({ chatPassBusy: false });
-  if (chatPassBusy) return;
+  if (!s.enabled || !s.botToken) {
+    console.info("inbox chat skip: disabled or missing bot token");
+    return;
+  }
+  const store = await chrome.storage.local.get({
+    chatPassBusy: false,
+    chatPassBusyAt: 0,
+  });
+  const busyAge = Date.now() - (store.chatPassBusyAt || 0);
+  // Clear stuck busy flag (SW kill / long pass) after 3 minutes
+  if (store.chatPassBusy && busyAge > 3 * 60 * 1000) {
+    console.warn("inbox chat clearing stale chatPassBusy", busyAge, "ms");
+    await chrome.storage.local.set({ chatPassBusy: false, chatPassBusyAt: 0 });
+  } else if (store.chatPassBusy) {
+    console.info("inbox chat skip: busy");
+    return;
+  }
 
   try {
-    await chrome.storage.local.set({ chatPassBusy: true });
+    await chrome.storage.local.set({
+      chatPassBusy: true,
+      chatPassBusyAt: Date.now(),
+    });
     const tab = await ensureInboxTab({ activate: false });
     if (!/\/app\/pobox/i.test(tab.url || "")) {
       await chrome.tabs.update(tab.id, { url: INBOX_URL, active: false });
       await sleep(2500);
     }
     const result = await sendToTab(tab.id, { type: "FM_CHAT_PASS" });
-    if (result?.results?.length) {
-      console.info("inbox chat pass", result);
-    }
+    console.info("inbox chat pass", {
+      ok: result?.ok,
+      reason: result?.reason,
+      count: result?.results?.length || 0,
+      results: result?.results || [],
+    });
   } catch (e) {
     console.warn("inbox chat pass failed", e);
   } finally {
-    await chrome.storage.local.set({ chatPassBusy: false });
+    await chrome.storage.local.set({ chatPassBusy: false, chatPassBusyAt: 0 });
   }
 }
 
@@ -615,5 +635,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 scheduleJobPoll();
 scheduleChatPoll();
+// Unstick a busy flag left by a killed service worker
+chrome.storage.local.set({ chatPassBusy: false, chatPassBusyAt: 0 }).catch(() => {});
 pollJobs();
 pollChat();

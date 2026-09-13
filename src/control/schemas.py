@@ -125,7 +125,7 @@ class BotSettingsBody(BaseModel):
 
 class BotSettings(BaseModel):
     outreach_subject: str = (
-        "FastAPI/Next.js billing module – remote contract, ~1 month"
+        "FastAPI/Next.js billing module – remote contract, about 1 month"
     )
     outreach_body: str = ""
     github_unlock_after_messages: int = 24

@@ -97,22 +97,18 @@
     return sec * 1000;
   }
 
-  /** Random pause between outreach UI steps (3–10 seconds). */
+  /** Random pause between outreach UI steps — disabled; only DM interval remains. */
   function stepDelayMs() {
-    return (3 + Math.floor(Math.random() * 8)) * 1000;
+    return 0;
   }
 
   async function pauseStep(label) {
     await touchCampaignAlive();
-    const ms = stepDelayMs();
-    await emitLog(`Step wait ${Math.round(ms / 1000)}s${label ? ` (${label})` : ""}…`);
-    const end = Date.now() + ms;
-    while (Date.now() < end) {
-      if (await shouldStop()) return false;
-      if (Date.now() % 5000 < 600) await touchCampaignAlive();
-      await sleep(Math.min(500, end - Date.now()));
+    if (await shouldStop()) return false;
+    // No per-action wait; anti-spam delay is only waitBetweenDms (240–300s).
+    if (label) {
+      /* kept for call-site clarity; intentionally not logged as a wait */
     }
-    await touchCampaignAlive();
     return true;
   }
 
@@ -660,12 +656,77 @@
     }
   }
 
+  function isUiChromeName(text) {
+    const s = (text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    if (!s) return true;
+    if (
+      /only\s+enterprise|enterprise\s+members?|only\s+remote|premium\s+member|show\s+contact|add\s+to\s+watchlist|add\s+note|find\s+freelancers|^verified$|^watchlist$|^contact$|^kontakt|^add\s+note$|^note$/.test(
+        s
+      )
+    ) {
+      return true;
+    }
+    // Action / chrome labels (buttons, tabs)
+    if (
+      /^(add|edit|show|hide|save|cancel|close|next|back|share|copy|download|upload|delete|remove|open|view|send|reply|message|note|notes|watchlist|contact|kontakt)(\s|$)/.test(
+        s
+      )
+    ) {
+      return true;
+    }
+    // Single chrome tokens / short UI labels
+    if (
+      /^(only|remote|available|verified|premium|contact|watchlist|full|senior|lead|find|the|freelancer|profile|members?|enterprise|note|notes)(\s|$)/.test(
+        s
+      ) &&
+      s.split(/\s+/).length <= 4
+    ) {
+      const parts = s.split(/\s+/);
+      if (
+        parts.every((p) =>
+          /^(only|remote|available|verified|premium|contact|watchlist|full|senior|lead|find|the|freelancer|profile|members?|enterprise|note|notes|add)$/i.test(
+            p
+          )
+        )
+      ) {
+        return true;
+      }
+      if (/^only\b/.test(s) || /^enterprise\b/.test(s) || /\bmembers?\b/.test(s)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function isEnterprisePaywallVisible(root = null) {
+    const scope = root || profileModalRoot() || document.body;
+    const text = (scope.innerText || "").toLowerCase();
+    return (
+      /only\s+enterprise\s+members/.test(text) ||
+      /upgrade\s+to\s+enterprise/.test(text) ||
+      /enterprise\s+members?\s+can\s+contact/.test(text)
+    );
+  }
+
+  function profileIdFromUrl() {
+    const m = String(location.search || "").match(/[?&]id=(\d+)/i);
+    return m ? m[1] : null;
+  }
+
   function looksLikePersonName(text) {
     const s = (text || "").replace(/\s+/g, " ").trim();
     if (!s || s.length > 60) return false;
     if (hasTitleSeparator(s)) return false;
+    if (isUiChromeName(s)) return false;
     if (
-      /\b(senior|lead|engineer|developer|architect|consultant|manager|designer|devops|backend|frontend|full[\s-]?stack|scientist|analyst|software|python|java|react|fastapi|django|next\.?js)\b/i.test(
+      /\b(senior|lead|engineer|developer|architect|consultant|manager|designer|devops|backend|frontend|full[\s-]?stack|scientist|analyst|software|python|java|react|fastapi|django|next\.?js|enterprise|members?|note|notes)\b/i.test(
+        s
+      )
+    ) {
+      return false;
+    }
+    if (
+      /only\s+remote|^only\b|^remote\b|available|verified|premium|watchlist|contact|^add\b/i.test(
         s
       )
     ) {
@@ -674,8 +735,20 @@
     if (/\d|[/\\|@]/.test(s)) return false;
     const parts = s.split(/\s+/);
     if (parts.length < 2 || parts.length > 4) return false;
-    const caps = parts.filter((p) => /^[A-ZÀ-ÖØ-Ý]/.test(p)).length;
-    return caps >= parts.length - 1;
+    if (
+      parts.some((p) =>
+        /^(only|remote|available|full|senior|lead|the|find|enterprise|members?|add|note|notes|edit|show|hide)$/i.test(
+          p
+        )
+      )
+    ) {
+      return false;
+    }
+    // Every token must look like a name part (capitalized), not "Add note"
+    if (!parts.every((p) => /^[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ'’-]+$/.test(p) || /^[A-ZÀ-ÖØ-Ý]\.$/.test(p))) {
+      return false;
+    }
+    return true;
   }
 
   function looksLikeJobTitle(text) {
@@ -707,45 +780,49 @@
       .map((l) => l.trim())
       .filter(Boolean);
 
-    // Prefer a real person name over a job-title heading.
+    // Prefer a real person name over a job-title heading / paywall chrome.
     let name = "";
+    const nameCandidateOk = (t) => {
+      if (!t || t.length < 2) return false;
+      if (isUiChromeName(t) || looksLikeJobTitle(t) || looksLikeLocation(t)) return false;
+      // Strict: real person names only (no loose title-case fallback for UI labels)
+      return looksLikePersonName(t);
+    };
     for (const sel of [
       "[data-testid='freelancer-name']",
-      "[data-id*='name']",
       "h1",
       "h2",
     ]) {
       for (const el of qsa(sel, root)) {
         const t = elText(el).split("\n")[0].trim();
-        if (!t || t.length < 2) continue;
-        if (looksLikeJobTitle(t) || looksLikeLocation(t)) continue;
-        if (looksLikePersonName(t) || /^[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ'’-]+(\s+[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ'’-]+){1,3}$/.test(t)) {
-          name = t;
-          break;
-        }
+        if (!nameCandidateOk(t)) continue;
+        name = t;
+        break;
       }
       if (name) break;
     }
     if (!name) {
       for (const line of lines.slice(0, 12)) {
-        if (looksLikePersonName(line)) {
+        if (nameCandidateOk(line)) {
           name = line;
           break;
         }
       }
     }
-    // Last resort: first heading that isn't clearly a long job title
+    // Last resort: first heading that looks like a real person name only
     if (!name) {
       for (const sel of ["h1", "h2"]) {
         const el = root.querySelector(sel);
         if (!el) continue;
         const t = elText(el).split("\n")[0].trim();
-        if (t && !looksLikeLocation(t) && t.length < 50) {
+        if (nameCandidateOk(t) && t.length < 50) {
           name = t;
           break;
         }
       }
     }
+    if (name && isUiChromeName(name)) name = "";
+
 
     let title = "";
     let location = "";
@@ -859,13 +936,20 @@
 
     const href = window.location.href;
     const keyMatch = href.match(/\/freelancer\/([^/?#]+)/);
+    const urlId = profileIdFromUrl();
+    const profileKey =
+      (urlId ? `id-${urlId}` : null) ||
+      keyMatch?.[1] ||
+      (name && !isUiChromeName(name) ? name : null) ||
+      href;
     return {
-      name,
+      name: name && !isUiChromeName(name) ? name : "",
       title,
       location,
       skills,
       experience,
-      profileKey: keyMatch?.[1] || name || href,
+      profileKey,
+      enterpriseLocked: isEnterprisePaywallVisible(root),
     };
   }
 
@@ -925,8 +1009,45 @@
     return settings?.dryRun === true || settings?.dryRun === "true" || settings?.dry_run === true;
   }
 
+  /** Dismiss contact form / overlays so Next or list open can work. */
+  async function dismissContactForm() {
+    for (let i = 0; i < 3; i++) {
+      const formOpen = Boolean(
+        firstVisible(["[role='dialog'] textarea", ".modal textarea", "textarea"])
+      );
+      if (!formOpen && profilePanelOpen()) break;
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true })
+      );
+      await sleep(400);
+    }
+    // If still on a form-only dialog, use close control
+    if (firstVisible(["[role='dialog'] textarea", "textarea"])) {
+      await closeModal();
+    }
+  }
+
+  /** Wait until the open modal shows a real person name (after Next / open). */
+  async function waitForProfileName(timeoutMs = 8000) {
+    const end = Date.now() + timeoutMs;
+    let last = null;
+    while (Date.now() < end) {
+      last = readOpenProfile();
+      if (last.enterpriseLocked) return last;
+      if (last.name && looksLikePersonName(last.name) && !isUiChromeName(last.name)) {
+        return last;
+      }
+      await sleep(300);
+    }
+    return last || readOpenProfile();
+  }
+
   /** Bottom-right next profile control (→) after a DM. */
   async function clickNextProfile() {
+    const beforeId = profileIdFromUrl();
+    const beforeInfo = readOpenProfile();
+    const beforeKey = (beforeInfo.profileKey || "").toString();
+    const beforeName = (beforeInfo.name || "").toString();
     const candidates = qsa("button, a, [role='button'], [aria-label]").filter(
       (el) => {
         if (!visible(el)) return false;
@@ -952,7 +1073,27 @@
     if (!best && candidates[0]) best = candidates[0];
     if (!best) return false;
     best.click();
-    return true;
+    // Wait until the SERP modal actually changes profile (&id=, key, or name).
+    for (let i = 0; i < 32; i++) {
+      await sleep(300);
+      const afterId = profileIdFromUrl();
+      if (beforeId && afterId && afterId !== beforeId) return true;
+      const after = readOpenProfile();
+      const afterKey = (after.profileKey || "").toString();
+      if (afterKey && beforeKey && afterKey !== beforeKey) return true;
+      const afterName = (after.name || "").toString();
+      if (
+        afterName &&
+        beforeName &&
+        afterName !== beforeName &&
+        looksLikePersonName(afterName)
+      ) {
+        return true;
+      }
+      // id appeared when we had none
+      if (!beforeId && afterId) return true;
+    }
+    return "unchanged";
   }
 
   async function closeModal() {
@@ -974,18 +1115,27 @@
 
   /**
    * Contact → fill → send (or dry-run). Project select is skipped — FM allows send without it.
-   * Each UI action is separated by a random 3–10s pause.
+   * No per-step waits; only the configured DM interval runs between successful sends.
    */
   async function runContactAndSend(settings) {
     const T = globalThis.FMOutreach;
     const dry = isDryRun(settings);
-    const info = readOpenProfile();
-    if (!info.name) {
-      return { ok: false, reason: "no_profile_name", info };
+    // After Next / open, modal content can lag — wait for a real name.
+    let info = await waitForProfileName(8000);
+    if (info.enterpriseLocked) {
+      return { ok: false, reason: "enterprise_paywall", info };
+    }
+    if (!info.name || isUiChromeName(info.name) || !looksLikePersonName(info.name)) {
+      return {
+        ok: false,
+        reason: "no_profile_name",
+        info: { ...info, name: info.name || "" },
+      };
     }
 
     if (
-      (await T.wasContactedByKey?.(settings, info.profileKey)) ||
+      (info.profileKey &&
+        (await T.wasContactedByKey?.(settings, info.profileKey))) ||
       (await T.wasContactedByName(settings, info.name))
     ) {
       return { ok: false, reason: "already_contacted", info };
@@ -1019,11 +1169,27 @@
         "…"
     );
     let personalized = await T.personalizeOutreach(settings, info);
+    const looksTruncated = (b) => {
+      const t = String(b || "").trim();
+      if (t.length < 160) return true;
+      if (/\bif you\s*$/i.test(t) || /\bif you'?re\s*$/i.test(t)) return true;
+      if (/\blet me know\s*$/i.test(t) || /\blooking forward\s*$/i.test(t)) return true;
+      if (/,\s*$/.test(t) || /[—–]\s*$/.test(t)) return true;
+      if (!/[.!?]\s*$/.test(t) && !/(regards|cheers|sincerely|thanks)\b/i.test(t)) {
+        return true;
+      }
+      return false;
+    };
     if (
       /\[\s*[^\]]+\s*\]/.test(personalized.body || "") ||
-      /specific detail from their profile/i.test(personalized.body || "")
+      /specific detail from their profile/i.test(personalized.body || "") ||
+      /^Hello\s+(Only|Remote|Full|Senior)\b/i.test(personalized.body || "") ||
+      looksTruncated(personalized.body)
     ) {
-      await emitLog("Body still had placeholders — using local profile detail.", "warn");
+      await emitLog(
+        "Generated body invalid (placeholder/bad greeting/truncated) — using local template.",
+        "warn"
+      );
       const safeDetail = T.pickDetail(
         info.title,
         info.location,
@@ -1053,6 +1219,7 @@
 
     if (dry) {
       await emitLog(`Dry-run filled form for ${info.name} (not sending)`);
+      await dismissContactForm();
       return { ok: true, reason: "dry_run", info, subject, detail };
     }
 
@@ -1073,6 +1240,8 @@
     } catch (_e) {
       /* ignore ledger errors */
     }
+    await sleep(800);
+    await dismissContactForm();
     return { ok: true, reason: "sent", info, subject, detail };
   }
 
@@ -1094,6 +1263,16 @@
       await sleep(Math.min(1000, end - Date.now()));
     }
     return true;
+  }
+
+  function isQuickSkipReason(reason) {
+    return (
+      reason === "already_contacted" ||
+      reason === "enterprise_paywall" ||
+      reason === "no_profile_name" ||
+      reason === "contact_button_missing" ||
+      reason === "contact_form_missing"
+    );
   }
 
   async function runCampaign(settings) {
@@ -1203,7 +1382,9 @@
       if (settings.resumeProfile) {
         // Jump straight into Contact on the already-open profile.
         const limit = Math.max(1, Number(settings.limit) || 10);
-        while (stats.sent + stats.failed < limit) {
+        const maxAttempts = Math.max(limit * 8, limit + 30);
+        let fallThroughToList = false;
+        while (stats.sent < limit && stats.attempted < maxAttempts) {
           if (await shouldStop()) {
             finishStatus = "stopped";
             break;
@@ -1219,24 +1400,39 @@
             );
           } else if (result.reason === "already_contacted") {
             stats.skipped += 1;
+            await pushLiveStats();
             await emitLog(`Skip already contacted → ${result.info?.name || "?"}`);
+          } else if (result.reason === "enterprise_paywall") {
+            stats.skipped += 1;
+            await pushLiveStats();
+            await emitLog("Skip Enterprise paywall profile (no contact access).", "warn");
+          } else if (result.reason === "no_profile_name") {
+            stats.skipped += 1;
+            await pushLiveStats();
+            await emitLog(
+              `Skip — no real freelancer name on modal (got "${(result.info?.name || "").slice(0, 40)}").`,
+              "warn"
+            );
           } else if (result.reason === "stopped") {
             finishStatus = "stopped";
             break;
           } else {
             stats.failed += 1;
+            await pushLiveStats();
             await emitLog(
               `Failed → ${result.info?.name || "?"} (${result.reason})`,
               "warn"
             );
           }
-          if (stats.sent + stats.failed >= limit) break;
+          if (stats.sent >= limit) break;
           if (!(await pauseStep("before Next →"))) {
             finishStatus = "stopped";
             break;
           }
-          if (await clickNextProfile()) {
+          const nextResult = await clickNextProfile();
+          if (nextResult === true) {
             await emitLog("Clicked next (→) profile.");
+            await waitForProfileName(6000);
             await chrome.storage.local.set({
               pendingCampaign: {
                 settings: { ...settings, resumeProfile: true, skipSearch: true },
@@ -1249,19 +1445,39 @@
               break;
             }
           } else {
-            await emitLog("Next (→) not found — ending campaign.");
+            await emitLog(
+              nextResult === "unchanged"
+                ? "Next (→) did not change profile — closing modal; continue from card titles."
+                : "Next (→) not found — closing modal; continue from card titles.",
+              "warn"
+            );
+            await closeModal();
+            fallThroughToList = true;
             break;
           }
-          if (!(await waitBetweenDms(settings))) {
+          // Full anti-spam wait only after a real send; skips move on quickly.
+          if (result.ok) {
+            if (!(await waitBetweenDms(settings))) {
+              finishStatus = "stopped";
+              break;
+            }
+          } else if (isQuickSkipReason(result.reason)) {
+            await sleep(1200);
+          } else if (!(await waitBetweenDms(settings))) {
             finishStatus = "stopped";
             break;
           }
         }
-        await emitLog(
-          `Done. attempted=${stats.attempted} sent=${stats.sent} skipped=${stats.skipped} failed=${stats.failed}`
-        );
-        await finishJob(finishStatus, stats, finishError);
-        return { ok: true, stats };
+        if (!fallThroughToList || stats.sent >= limit || finishStatus === "stopped") {
+          await emitLog(
+            `Done. attempted=${stats.attempted} sent=${stats.sent} skipped=${stats.skipped} failed=${stats.failed}`
+          );
+          await finishJob(finishStatus, stats, finishError);
+          return { ok: true, stats };
+        }
+        // Continue below with SERP card titles (same job / stats).
+        settings = { ...settings, resumeProfile: false, skipSearch: true };
+        await emitLog("Continuing campaign from search result card titles…");
       }
 
       const { total, cards: initialCards } = await waitForSearchResults();
@@ -1283,7 +1499,7 @@
       }
       await pushLiveStats({
         profiles_found: found,
-        contacted_since_search: 0,
+        contacted_since_search: stats.contacted_since_search || 0,
       });
 
       if (!cards.length) {
@@ -1298,10 +1514,11 @@
       }
 
       const limit = Math.max(1, Number(settings.limit) || 10);
+      const maxAttempts = Math.max(limit * 8, limit + 30);
       let openedFirst = false;
       let titleIndex = 0;
 
-      while (stats.sent + stats.failed < limit) {
+      while (stats.sent < limit && stats.attempted < maxAttempts) {
         if (await shouldStop()) {
           await emitLog("Campaign stopped.");
           finishStatus = "stopped";
@@ -1401,6 +1618,17 @@
             stats.skipped += 1;
             await pushLiveStats();
             await emitLog(`Skip already contacted → ${result.info?.name || "?"}`);
+          } else if (result.reason === "enterprise_paywall") {
+            stats.skipped += 1;
+            await pushLiveStats();
+            await emitLog("Skip Enterprise paywall profile (no contact access).", "warn");
+          } else if (result.reason === "no_profile_name") {
+            stats.skipped += 1;
+            await pushLiveStats();
+            await emitLog(
+              `Skip — no real freelancer name on modal (got "${(result.info?.name || "").slice(0, 40)}").`,
+              "warn"
+            );
           } else if (result.reason === "stopped") {
             finishStatus = "stopped";
             break;
@@ -1413,7 +1641,7 @@
             );
           }
 
-          if (stats.sent + stats.failed >= limit) break;
+          if (stats.sent >= limit) break;
           if (await shouldStop()) {
             finishStatus = "stopped";
             break;
@@ -1425,14 +1653,20 @@
             break;
           }
           const nextOk = await clickNextProfile();
-          if (nextOk) {
+          if (nextOk === true) {
             await emitLog("Clicked next (→) profile.");
+            await waitForProfileName(6000);
             if (!(await pauseStep("after Next →"))) {
               finishStatus = "stopped";
               break;
             }
           } else {
-            await emitLog("Next (→) not found — returning to list for next title.");
+            await emitLog(
+              nextOk === "unchanged"
+                ? "Next (→) did not change profile — closing modal; open next card title."
+                : "Next (→) not found — closing modal; open next card title.",
+              "warn"
+            );
             await closeModal();
             openedFirst = false;
             if (!collectTitleLinks().length && /\/freelancer\/[^/?#]+/i.test(location.pathname)) {
@@ -1441,7 +1675,14 @@
             }
           }
 
-          if (!(await waitBetweenDms(settings))) {
+          if (result.ok) {
+            if (!(await waitBetweenDms(settings))) {
+              finishStatus = "stopped";
+              break;
+            }
+          } else if (isQuickSkipReason(result.reason)) {
+            await sleep(1200);
+          } else if (!(await waitBetweenDms(settings))) {
             finishStatus = "stopped";
             break;
           }

@@ -1,31 +1,30 @@
-"""Fixed freelancermap assessment messages (post-outreach chat)."""
+"""Fixed freelancermap assessment messages (ASD-STE100)."""
 
 MSG_ASK_GITHUB = (
-    "Okay. Our team members will review your answer.\n"
-    "Next, I will share a simple take-home assignment to check your development "
-    "speed and quality.\n"
-    "Please share your github username."
+    "Thank you. Our team will review your answers.\n"
+    "Next, I will send a short take-home assignment. "
+    "This assignment measures your development speed and quality.\n"
+    "Please send your GitHub username."
 )
 
 MSG_ASSIGNMENT_INVITED = (
-    "Invited you to the assignment. Check your email and follow all of "
-    "requirements in readme.md on time.\n"
-    "Will get back to you 3 hours later and review with our team."
+    "I invited you to the assignment repository. "
+    "Open your email and read all requirements in README.md.\n"
+    "I will review your work with our team in about 3 hours."
 )
 
 MSG_ASSIGNMENT_RECEIVED = (
-    "Thank you for your work. Let us check and will let you know after checking"
+    "Thank you for your work. We will review it and tell you the result."
 )
 
 MSG_FINAL_REJECTION = (
-    "Hi {name},\n"
-    "Thank you very much for the time and effort you put into the assessment. "
-    "We were impressed with your work; however, after careful consideration, "
-    "we have decided to move forward with another candidate for this position.\n"
-    "We truly appreciate your interest in working with us and would be happy to "
-    "contact you when we begin development on future products that may be a good "
-    "fit for your skills.\n"
-    "Thank you again, and we wish you continued success."
+    "Hello {name},\n"
+    "Thank you for your time on this assessment. "
+    "We reviewed your work carefully. "
+    "We will continue with another candidate for this role.\n"
+    "We value your interest. "
+    "We may contact you again for a future product that fits your skills.\n"
+    "Thank you again. We wish you success."
 )
 
 

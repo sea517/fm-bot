@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from src.ai.llm import LLMError, generate
+from src.ai.ste100 import with_ste100
 from src.conversation.timing import (
     availability_is_later,
     format_availability_when,
@@ -17,7 +18,8 @@ from src.conversation.timing import (
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM = """You are Oliver's recruiting assistant on Slack.
+_SYSTEM = with_ste100(
+    """You are Oliver's recruiting assistant on Slack.
 READ the candidate's latest message in context and classify it.
 Do NOT write a reply to the candidate.
 
@@ -55,8 +57,9 @@ INTENT: greeting|availability|intro|project|tech_answer|github|ready|placeholder
 ANSWERS: yes|no
 AVAILABILITY_WHEN: now|later|none
 AVAILABILITY_START_ISO: <UTC ISO-8601 or none>
-SUMMARY: <one short sentence>
+SUMMARY: <one short ASD-STE100 sentence>
 """
+)
 
 
 @dataclass

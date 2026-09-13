@@ -52,9 +52,10 @@ The extension fills **subject + body** and clicks **Send message**. Project
 selection is skipped (not required on freelancermap for DM send).
 
 `{detail}` in the message body is optional. DeepSeek (`deepseek/deepseek-v4-flash-0731`
-via OpenRouter) rewrites a **unique DM per freelancer** from the shared contact-form
-template, grounded in their profile (title, skills, experience). Bracket
+via OpenRouter) rewrites a **unique ASD-STE100 DM per freelancer** from the shared
+contact-form template, grounded in their profile (title, skills, experience). Bracket
 placeholders like `[specific detail from their profile]` are stripped and never sent.
+All bot-written text follows **ASD-STE100** (Simplified Technical English).
 
 ## Flow
 

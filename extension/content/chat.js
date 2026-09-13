@@ -1,7 +1,15 @@
-/* Freelancermap inbox chat — only on /app/pobox/main. */
+/* Freelancermap inbox chat — /app/pobox/main (Postfach UI selectors). */
 (function () {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const INBOX_PATH = /\/app\/pobox/i;
+  const INBOX_URL = "https://www.freelancermap.com/app/pobox/main";
+
+  // Verified Postfach markup (same as src/freelancermap/messages.py)
+  const ROW_SELECTOR = "div.pobox-message-preview[data-conversation-id]";
+  const REPLY_INPUT = "#pobox-reply-footer-textarea";
+  const SEND_BUTTON = "[data-id='pobox-message-footer-reply-send']";
+  const THREAD_CONTAINER = ".pobox-message-body .items-container";
+
   let running = false;
 
   function onInboxPage() {
@@ -26,9 +34,15 @@
     const proto =
       el instanceof HTMLTextAreaElement
         ? window.HTMLTextAreaElement.prototype
-        : window.HTMLInputElement.prototype;
-    const desc = Object.getOwnPropertyDescriptor(proto, "value");
-    desc?.set?.call(el, value);
+        : el instanceof HTMLInputElement
+          ? window.HTMLInputElement.prototype
+          : null;
+    if (proto) {
+      const desc = Object.getOwnPropertyDescriptor(proto, "value");
+      desc?.set?.call(el, value);
+    } else {
+      el.textContent = value;
+    }
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
   }
@@ -39,113 +53,213 @@
     const raw = (text || "").trim();
     const words = raw ? raw.split(/\s+/).length : 0;
     const chars = raw.length;
-    // Length factor 0..1 → prefer longer waits for longer replies
     const lengthFactor = Math.min(1, words / 80 + chars / 1200);
     const minSec = 5;
     const maxSec = 120;
     const span = maxSec - minSec;
-    // Random around a length-biased center, still covering most of 5–120
     const center = minSec + span * (0.15 + lengthFactor * 0.7);
     const spread = span * 0.45;
     let sec = center + (Math.random() * 2 - 1) * spread;
     sec = Math.max(minSec, Math.min(maxSec, sec));
-    // Ensure this wait differs from the previous reply (at least ~3s apart)
     let ms = Math.round(sec * 1000);
     if (Math.abs(ms - lastReplyDelayMs) < 3000) {
       const bump = 5000 + Math.floor(Math.random() * 25000);
-      ms = Math.max(minSec * 1000, Math.min(maxSec * 1000, ms + (Math.random() < 0.5 ? bump : -bump)));
+      ms = Math.max(
+        minSec * 1000,
+        Math.min(maxSec * 1000, ms + (Math.random() < 0.5 ? bump : -bump))
+      );
     }
-    // Final full-range jitter so every reply is unique
     ms = Math.max(
       minSec * 1000,
-      Math.min(
-        maxSec * 1000,
-        ms + Math.floor(Math.random() * 7000) - 3500
-      )
+      Math.min(maxSec * 1000, ms + Math.floor(Math.random() * 7000) - 3500)
     );
     lastReplyDelayMs = ms;
     return ms;
   }
 
-  function conversationIdFromHref(href) {
-    try {
-      const u = new URL(href, location.href);
-      const m =
-        u.pathname.match(/\/(?:app\/)?pobox\/(?:main\/)?(?:conversation\/|thread\/)?(\d+)/i) ||
-        u.pathname.match(/\/(?:messages|conversation|chat)\/(\d+)/i) ||
-        u.search.match(/[?&](?:id|conversationId|conversation|threadId)=(\d+)/i) ||
-        u.hash.match(/(\d{4,})/);
-      return m?.[1] || null;
-    } catch {
-      return null;
-    }
-  }
-
-  function listConversationAnchors() {
-    const anchors = qsa("a[href]").filter((a) => {
-      if (!visible(a)) return false;
-      const href = a.getAttribute("href") || "";
-      return /pobox|messages|conversation|chat|thread/i.test(href) && /\d{3,}/.test(href);
-    });
-    // Also clickable rows that are not <a>
-    const rows = qsa("[data-conversation-id], [data-id], [role='listitem'], li, tr").filter(
-      (el) => {
-        if (!visible(el)) return false;
-        const id =
-          el.getAttribute("data-conversation-id") ||
-          el.getAttribute("data-id") ||
-          "";
-        return /^\d{3,}$/.test(id);
-      }
-    );
-
-    const seen = new Set();
+  function listConversationRows() {
+    const rows = qsa(ROW_SELECTOR);
     const out = [];
-    for (const a of anchors) {
-      const id = conversationIdFromHref(a.href);
+    const seen = new Set();
+    for (const el of rows) {
+      const id = el.getAttribute("data-conversation-id");
       if (!id || seen.has(id)) continue;
-      seen.add(id);
-      out.push({
-        id,
-        name: (a.textContent || "").trim().split("\n")[0].trim().slice(0, 80),
-        el: a,
-      });
-    }
-    for (const row of rows) {
-      const id =
-        row.getAttribute("data-conversation-id") || row.getAttribute("data-id");
-      if (!id || seen.has(id)) continue;
+      // Prefer visible; still keep hidden unread IDs when list is partially scrolled
+      const nameEl = el.querySelector(".image-row span");
+      const name = (nameEl?.textContent || el.textContent || "")
+        .trim()
+        .split("\n")[0]
+        .trim()
+        .slice(0, 80);
+      const unread = (el.className || "").toLowerCase().includes("unread");
       seen.add(id);
       out.push({
         id: String(id),
-        name: (row.textContent || "").trim().split("\n")[0].trim().slice(0, 80),
-        el: row,
+        name,
+        unread,
+        visible: visible(el),
+        el,
       });
     }
-    return out.slice(0, 40);
+    // Unread first, then visible, then rest
+    out.sort((a, b) => {
+      if (a.unread !== b.unread) return a.unread ? -1 : 1;
+      if (a.visible !== b.visible) return a.visible ? -1 : 1;
+      return 0;
+    });
+    return out;
+  }
+
+  async function ensureInboxList() {
+    if (!onInboxPage()) {
+      location.assign(INBOX_URL);
+      await sleep(2500);
+    }
+    // Opening a thread hides the list — reload if no visible rows.
+    const visibleRows = listConversationRows().filter((r) => r.visible);
+    if (visibleRows.length === 0) {
+      console.info("[FM Chat] conversation list hidden — reloading inbox");
+      location.assign(INBOX_URL);
+      await sleep(2800);
+    }
+    for (let i = 0; i < 20; i++) {
+      if (listConversationRows().some((r) => r.visible)) return true;
+      await sleep(400);
+    }
+    return listConversationRows().length > 0;
+  }
+
+  async function openConversation(id) {
+    await ensureInboxList();
+    let row = document.querySelector(
+      `${ROW_SELECTOR}[data-conversation-id='${CSS.escape(String(id))}']`
+    );
+    if (!row || !visible(row)) {
+      location.assign(INBOX_URL);
+      await sleep(2500);
+      row = document.querySelector(
+        `${ROW_SELECTOR}[data-conversation-id='${CSS.escape(String(id))}']`
+      );
+    }
+    if (!row) return false;
+    try {
+      row.scrollIntoView({ block: "center", behavior: "instant" });
+    } catch (_e) {
+      /* ignore */
+    }
+    row.click();
+    for (let i = 0; i < 25; i++) {
+      if (document.querySelector(THREAD_CONTAINER)) return true;
+      await sleep(200);
+    }
+    return Boolean(document.querySelector(THREAD_CONTAINER));
   }
 
   function readThreadMessages() {
-    const root =
-      document.querySelector(
-        "[class*='message'], [class*='Message'], [class*='thread'], [class*='Thread'], main, [role='main']"
-      ) || document.body;
-    const blocks = qsa("p, div, li, span", root).filter((el) => {
-      if (!visible(el)) return false;
-      const t = (el.textContent || "").trim();
-      if (t.length < 2 || t.length > 4000) return false;
-      if (el.querySelector("p, div, li")) return false;
-      return true;
-    });
-    return blocks.slice(-16).map((el) => (el.textContent || "").trim());
+    const container = document.querySelector(THREAD_CONTAINER);
+    if (!container) return [];
+    const text = (container.innerText || "").trim();
+    if (!text) return [];
+
+    const noiseContains = [
+      "möchten sie die konversation",
+      "in den papierkorb",
+      "gesendete anhänge",
+      "keine anhänge vorhanden",
+      "keine konversation ausgewählt",
+      "wählen sie eine konversation",
+    ];
+    const noiseExact = new Set([
+      "ablehnen",
+      "antworten",
+      "antwort",
+      "weiterleiten",
+      "zurück",
+      "mehr anzeigen",
+      "übersetzen",
+      "add note",
+      "contact",
+      "senden",
+      "send",
+    ]);
+
+    const lines = [];
+    for (const raw of text.split("\n")) {
+      const line = raw.trim();
+      if (!line || line.length > 4000) continue;
+      const low = line.toLowerCase();
+      if (noiseContains.some((n) => low.includes(n))) continue;
+      if (noiseExact.has(low)) continue;
+      lines.push(line);
+    }
+    return lines.slice(-40);
   }
 
-  function findComposer() {
-    return (
-      qsa("textarea").find(visible) ||
-      qsa("[contenteditable='true']").find(visible) ||
-      null
-    );
+  /** Newest candidate-facing blob for the API (not just one line). */
+  function latestMessageBlob(lines) {
+    if (!lines.length) return "";
+    // Prefer the last ~8 lines / 2500 chars — catches multi-line replies
+    const chunk = lines.slice(-8).join("\n").trim();
+    if (chunk.length <= 2500) return chunk;
+    return chunk.slice(-2500);
+  }
+
+  async function focusReplyField() {
+    let input = document.querySelector(REPLY_INPUT);
+    if (!input) {
+      // Wait briefly for footer
+      for (let i = 0; i < 15 && !input; i++) {
+        await sleep(200);
+        input = document.querySelector(REPLY_INPUT);
+      }
+    }
+    if (!input) return null;
+
+    try {
+      input.focus();
+    } catch (_e) {
+      try {
+        input.click();
+      } catch (_e2) {
+        /* ignore */
+      }
+    }
+    await sleep(900);
+
+    const expanded =
+      qsa(
+        ".pobox-message-footer textarea, textarea#pobox-reply-footer-textarea, #pobox-reply-footer-textarea"
+      ).find(visible) || null;
+    return expanded || input;
+  }
+
+  async function clickSendButton() {
+    const btn =
+      document.querySelector(SEND_BUTTON) ||
+      qsa("button, [role='button'], [data-id*='reply-send']").find((el) => {
+        const t = (el.textContent || "").trim().toLowerCase();
+        const id = (el.getAttribute("data-id") || "").toLowerCase();
+        return (
+          visible(el) &&
+          (id.includes("reply-send") ||
+            t === "send" ||
+            t === "send message" ||
+            t === "nachricht senden" ||
+            t === "antworten")
+        );
+      });
+    if (!btn) return false;
+    try {
+      btn.click();
+      return true;
+    } catch (_e) {
+      try {
+        btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        return true;
+      } catch (_e2) {
+        return false;
+      }
+    }
   }
 
   async function sendReply(text) {
@@ -153,8 +267,9 @@
     console.info("[FM Chat] waiting", Math.round(delay / 1000), "s before send");
     await sleep(delay);
 
-    const composer = findComposer();
+    const composer = await focusReplyField();
     if (!composer) return { ok: false, reason: "no_composer" };
+
     if (composer.tagName === "TEXTAREA" || composer.tagName === "INPUT") {
       setNativeValue(composer, text);
     } else {
@@ -162,20 +277,11 @@
       composer.textContent = text;
       composer.dispatchEvent(new Event("input", { bubbles: true }));
     }
-    await sleep(400);
-    const btn = qsa("button, [role='button']").find((el) => {
-      const t = (el.textContent || "").trim().toLowerCase();
-      return (
-        visible(el) &&
-        (t === "send" ||
-          t === "send message" ||
-          t === "nachricht senden" ||
-          t === "antworten")
-      );
-    });
-    if (!btn) return { ok: false, reason: "no_send_button" };
-    btn.click();
-    await sleep(1200);
+    await sleep(500);
+
+    const clicked = await clickSendButton();
+    if (!clicked) return { ok: false, reason: "no_send_button" };
+    await sleep(1500);
     return { ok: true, delayMs: delay };
   }
 
@@ -183,52 +289,73 @@
     const lines = readThreadMessages();
     if (!lines.length) return { ok: false, reason: "empty_thread" };
     const last = lines[lines.length - 1];
-    const botMarkers = [
+    const messageBlob = latestMessageBlob(lines);
+    // Skip only when the last bubble is one of our short fixed templates
+    // (not candidate replies that happen to include "Best regards").
+    const botExactStarts = [
       "Okay. Our team members will review your answer.",
-      "Invited you to the assignment.",
-      "Thank you for your work. Let us check",
-      "We were impressed with your work; however",
-      "Please reply with your GitHub username",
+      "Okay. Our team will review your answers.",
+      "I invited you to the assignment",
+      "Invited you to the assignment",
+      "Thank you for your work",
+      "We will continue with another candidate",
+      "Please send your GitHub username",
+      "Please share your github username",
     ];
-    if (botMarkers.some((m) => last.includes(m))) {
+    const lastTrim = last.trim();
+    if (
+      lastTrim.length < 420 &&
+      lastTrim.split(/\s+/).length < 70 &&
+      botExactStarts.some(
+        (m) => lastTrim === m || lastTrim.startsWith(m + "\n") || lastTrim.startsWith(m + " ")
+      )
+    ) {
       return { ok: true, reason: "last_is_bot" };
     }
-    const fingerprint = `${meta.id}:${last.slice(0, 200)}`;
+
+    const fingerprint = `${meta.id}:${messageBlob.slice(0, 240)}`;
     const store = await chrome.storage.local.get({ chatFingerprints: {} });
     const fps = store.chatFingerprints || {};
     if (fps[meta.id] === fingerprint) {
       return { ok: true, reason: "already_processed" };
     }
 
+    console.info("[FM Chat] turn", meta.id, meta.name, messageBlob.slice(0, 80));
     const res = await chrome.runtime.sendMessage({
       type: "FM_CHAT_TURN",
       conversation_id: String(meta.id),
       display_name: meta.name || null,
       profile_key: null,
-      message: last,
+      message: messageBlob,
     });
     if (!res?.reply) {
       if (res?.action === "duplicate") {
         fps[meta.id] = fingerprint;
         await chrome.storage.local.set({ chatFingerprints: fps });
       }
+      console.info("[FM Chat] no_reply", res?.action || res?.error || res);
       return {
         ok: true,
         reason: "no_reply",
         stage: res?.stage,
         action: res?.action,
+        error: res?.error || null,
       };
     }
     const sent = await sendReply(res.reply);
     if (sent.ok) {
       fps[meta.id] = fingerprint;
       await chrome.storage.local.set({ chatFingerprints: fps });
+      console.info("[FM Chat] sent reply to", meta.name || meta.id);
+    } else {
+      console.warn("[FM Chat] send failed", sent.reason);
     }
     return { ...sent, stage: res.stage, action: res.action };
   }
 
   async function runInboxPass() {
     if (!onInboxPage()) {
+      console.info("[FM Chat] not_inbox", location.href);
       return { ok: false, reason: "not_inbox", href: location.href };
     }
     if (running) return { ok: false, reason: "busy" };
@@ -239,12 +366,8 @@
         const due = await chrome.runtime.sendMessage({ type: "FM_CHAT_DUE" });
         for (const item of due?.items || []) {
           if (item.conversation_id && item.reply) {
-            const match = listConversationAnchors().find(
-              (c) => c.id === String(item.conversation_id)
-            );
-            if (match) {
-              match.el.click();
-              await sleep(1500);
+            const opened = await openConversation(item.conversation_id);
+            if (opened) {
               await sendReply(item.reply);
               results.push({ id: item.conversation_id, action: "rejected" });
             }
@@ -254,14 +377,28 @@
         /* ignore */
       }
 
-      const convos = listConversationAnchors();
-      for (const c of convos.slice(0, 8)) {
+      await ensureInboxList();
+      // Snapshot IDs first (DOM nodes go stale after open/reload)
+      const snapshot = listConversationRows().slice(0, 12);
+      console.info(
+        "[FM Chat] conversations",
+        snapshot.length,
+        snapshot.map((c) => `${c.unread ? "*" : ""}${c.id}:${c.name}`).join(", ")
+      );
+
+      for (const c of snapshot) {
         try {
-          c.el.click();
-          await sleep(1500);
+          const opened = await openConversation(c.id);
+          if (!opened) {
+            results.push({ id: c.id, ok: false, reason: "open_failed" });
+            continue;
+          }
+          await sleep(1000);
           const r = await processOpenThread(c);
-          results.push({ id: c.id, ...r });
-          await sleep(800);
+          results.push({ id: c.id, name: c.name, ...r });
+          // One successful live send per pass keeps the SW timeout healthy
+          if (r.ok && r.delayMs) break;
+          await sleep(600);
         } catch (e) {
           results.push({ id: c.id, ok: false, reason: String(e) });
         }
@@ -277,6 +414,15 @@
       runInboxPass()
         .then((r) => sendResponse(r))
         .catch((e) => sendResponse({ ok: false, reason: String(e) }));
+      return true;
+    }
+    if (msg?.type === "FM_CHAT_PING") {
+      sendResponse({
+        ok: true,
+        href: location.href,
+        rows: listConversationRows().length,
+        running,
+      });
       return true;
     }
     return false;

@@ -5,16 +5,16 @@ from __future__ import annotations
 import re
 
 OUTREACH_SUBJECT = (
-    "FastAPI/Next.js billing module – remote contract, ~1 month"
+    "FastAPI/Next.js billing module – remote contract, about 1 month"
 )
 
 OUTREACH_BODY = """Hello {name},
 
-Your profile came up in my search on freelancermap — specifically {detail} — so I wanted to send this your way.
+I found your profile on freelancermap. Your work with {detail} is relevant to this role.
 
-We're hiring a contractor to build the billing and revenue layer of a live multi-tenant PSA platform (FastAPI, Next.js, PostgreSQL, Stripe). Remote, ~80–100 hours/month, starting Oct 1st.
+We need a contractor for the billing and revenue layer of a live multi-tenant PSA platform. The stack is FastAPI, Next.js, PostgreSQL, and Stripe. The work is remote. Plan for about 80 to 100 hours each month. Start date is 1 October.
 
-The project brief is attached. If you're open to it, reply with your availability and we'll arrange a technical conversation.
+The project brief is attached. If you can do this work, reply with your availability. Then we can set a technical call.
 
 Best regards,
 David
@@ -26,14 +26,40 @@ def first_name(full_name: str) -> str:
     if not parts:
         return "there"
     first = parts[0]
-    # Avoid "Hello Full," when a job title was misread as the name
+    # Avoid "Hello Full," / "Hello Only," when UI chrome was misread as the name
+    blocked = {
+        "full",
+        "senior",
+        "lead",
+        "principal",
+        "staff",
+        "junior",
+        "only",
+        "remote",
+        "available",
+        "verified",
+        "premium",
+        "contact",
+        "watchlist",
+        "find",
+        "the",
+        "freelancer",
+        "profile",
+        "hello",
+        "dear",
+        "hi",
+        "hey",
+    }
+    if first.lower() in blocked:
+        return "there"
     if re.search(
-        r"\b(senior|lead|engineer|developer|architect|full[\s-]?stack|software)\b",
+        r"\b(senior|lead|engineer|developer|architect|full[\s-]?stack|software|"
+        r"only\s+remote|available)\b",
         full_name or "",
         re.I,
-    ) and len(parts) <= 3:
+    ) and (len(parts) <= 3 or first.lower() in blocked):
         return "there"
-    if first.lower() in {"full", "senior", "lead", "principal", "staff", "junior"}:
+    if not re.match(r"^[A-Za-zÀ-ÖØ-öø-ÿ'’-]+$", first):
         return "there"
     return first
 
