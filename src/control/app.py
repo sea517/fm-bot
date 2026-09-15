@@ -24,6 +24,7 @@ from src.control.schemas import (
     ChatTurnBody,
     ContactUpsertBody,
     CreateJobBody,
+    FollowUpDeliverBody,
     HeartbeatBody,
     JobEventBody,
     JobStatsBody,
@@ -250,7 +251,7 @@ def create_job(
             "job_id": job["id"],
             "bot_id": bot_id,
             "level": "info",
-            "message": f"Job queued: keyword={body.keyword!r} dry_run={body.dry_run}",
+            "message": f"Job queued: keyword={body.keyword!r} dry_run={body.dry_run}. Waiting for Chrome extension to claim (Poll dashboard must be on).",
         },
         return_representation=False,
     )
@@ -423,17 +424,22 @@ def active_job(
     _require_supabase()
     # Stuck cancel_requested with no worker finishing: treat as stopped.
     _finalize_cancel_requested(bot_id)
-    rows = sb_get(
-        "outreach_jobs",
-        params={
-            "bot_id": f"eq.{bot_id}",
-            "status": "eq.running",
-            "select": "*",
-            "order": "started_at.desc",
-            "limit": "1",
-        },
-    )
-    return {"job": rows[0] if rows else None}
+    # Include queued so the extension can see waiting work and claim it.
+    # Prefer running / cancel_requested over queued if several exist.
+    for status in ("running", "cancel_requested", "queued"):
+        rows = sb_get(
+            "outreach_jobs",
+            params={
+                "bot_id": f"eq.{bot_id}",
+                "status": f"eq.{status}",
+                "select": "*",
+                "order": "created_at.desc",
+                "limit": "1",
+            },
+        )
+        if rows:
+            return {"job": rows[0]}
+    return {"job": None}
 
 
 @app.post("/api/bots/{bot_id}/jobs/{job_id}/events")
@@ -591,6 +597,28 @@ def check_contact(
 ) -> dict[str, Any]:
     auth.require_bot(bot_id, authorization)
     _require_supabase()
+    # SPEC: check global opt-out before every outreach send
+    for key in (profile_key.strip(), display_name.strip(), display_name.strip().lower()):
+        if not key:
+            continue
+        opted = sb_get(
+            "fm_opt_outs",
+            params={
+                "identity_key": f"eq.{key}",
+                "select": "id,identity_key",
+                "limit": "1",
+            },
+        )
+        if opted:
+            return {
+                "known": True,
+                "opted_out": True,
+                "contact": {
+                    "profile_key": profile_key or None,
+                    "display_name": display_name or None,
+                    "status": "blocked",
+                },
+            }
     if profile_key:
         rows = sb_get(
             "fm_contacts",
@@ -842,12 +870,17 @@ def upsert_applicant(
             patch["conversation_id"] = body.conversation_id
         if body.profile_key and not existing.get("profile_key"):
             patch["profile_key"] = body.profile_key
+        if body.outreach_subject and not existing.get("outreach_subject"):
+            patch["outreach_subject"] = body.outreach_subject
+        if body.outreach_body and not existing.get("outreach_body"):
+            patch["outreach_body"] = body.outreach_body
         rows = sb_patch(
             "fm_applicants",
             match={"id": f"eq.{existing['id']}"},
             row=patch,
         )
         return rows[0] if rows else existing
+    settings = _bot_settings(bot_id)
     rows = sb_insert(
         "fm_applicants",
         {
@@ -860,6 +893,10 @@ def upsert_applicant(
             "message_count": 0,
             "github_unlocked": False,
             "updated_at": now,
+            "outreach_subject": body.outreach_subject or settings.outreach_subject or None,
+            "outreach_body": body.outreach_body or settings.outreach_body or None,
+            "follow_up_sent": False,
+            "opted_out": False,
         },
     )
     return rows[0]
@@ -923,12 +960,16 @@ def chat_turn(
                 "conversation_id": body.conversation_id,
                 "profile_key": body.profile_key,
                 "display_name": body.display_name,
-                "stage": "assessment_chat",
+                "stage": "stage_0",
                 "status": "active",
                 "message_count": 0,
                 "github_unlocked": False,
                 "updated_at": now,
                 "last_freelancer_message_at": now,
+                "outreach_subject": settings.outreach_subject or None,
+                "outreach_body": settings.outreach_body or None,
+                "follow_up_sent": False,
+                "opted_out": False,
             },
         )
         applicant = created[0]
@@ -970,9 +1011,42 @@ def chat_turn(
             "github_unlocked": applicant.get("github_unlocked"),
             "github_username": applicant.get("github_username"),
             "invite_ok": None,
-            "rejection_due_at": applicant.get("rejection_due_at"),
             "action": "duplicate",
+            "send_after_sec": None,
+            "authorised": False,
         }
+
+    # One outbound per inbound burst: if we already replied in the last 90s, coalesce.
+    recent_bot = sb_get(
+        "fm_messages",
+        params={
+            "applicant_id": f"eq.{applicant['id']}",
+            "role": "eq.bot",
+            "select": "id,created_at",
+            "order": "id.desc",
+            "limit": "1",
+        },
+    )
+    if recent_bot:
+        try:
+            ts = datetime.fromisoformat(
+                str(recent_bot[0].get("created_at") or "").replace("Z", "+00:00")
+            )
+            if (datetime.now(timezone.utc) - ts).total_seconds() < 90:
+                return {
+                    "applicant_id": applicant["id"],
+                    "reply": None,
+                    "stage": applicant.get("stage"),
+                    "message_count": applicant.get("message_count"),
+                    "github_unlocked": applicant.get("github_unlocked"),
+                    "github_username": applicant.get("github_username"),
+                    "invite_ok": None,
+                    "action": "coalesced",
+                    "send_after_sec": None,
+                    "authorised": False,
+                }
+        except ValueError:
+            pass
 
     sb_insert(
         "fm_messages",
@@ -992,34 +1066,88 @@ def chat_turn(
             "limit": "80",
         },
     )
+    outreach_parts: list[str] = []
+    if (applicant.get("outreach_body") or "").strip():
+        subj = (applicant.get("outreach_subject") or "").strip()
+        body_txt = applicant["outreach_body"].strip()
+        outreach_message = f"Subject: {subj}\n\n{body_txt}" if subj else body_txt
+    else:
+        if (settings.outreach_subject or "").strip():
+            outreach_parts.append(f"Subject: {settings.outreach_subject.strip()}")
+        if (settings.outreach_body or "").strip():
+            outreach_parts.append(settings.outreach_body.strip())
+        outreach_message = "\n\n".join(outreach_parts) if outreach_parts else None
+
+    opted_out = _is_opted_out(bot_id, applicant)
     result = process_freelancer_message(
         applicant=applicant,
         messages=history,
         freelancer_text=body.message,
         unlock_after=settings.github_unlock_after_messages,
         max_messages=settings.max_messages_per_applicant,
+        outreach_message=outreach_message,
+        opted_out_globally=opted_out,
+        thread_link=(
+            f"https://www.freelancermap.com/app/pobox/main?c={body.conversation_id}"
+        ),
     )
+
+    # Outbound gate: never persist/send model text unless authorised.
+    if not result.authorised or not result.reply:
+        patch_only = {
+            "updated_at": now,
+            **(result.patch or {}),
+        }
+        if result.stage:
+            patch_only["stage"] = result.stage
+        if result.patch.get("opted_out"):
+            _record_opt_out(bot_id, applicant)
+        if patch_only.keys() - {"updated_at"}:
+            sb_patch(
+                "fm_applicants",
+                match={"id": f"eq.{applicant['id']}"},
+                row=patch_only,
+                return_representation=False,
+            )
+        return {
+            "applicant_id": applicant["id"],
+            "reply": None,
+            "stage": result.stage,
+            "message_count": result.message_count,
+            "github_unlocked": result.github_unlocked,
+            "github_username": result.github_username,
+            "invite_ok": result.invite_ok,
+            "action": result.action,
+            "send_after_sec": None,
+            "authorised": False,
+        }
+
     patch: dict[str, Any] = {
         "stage": result.stage,
         "message_count": result.message_count,
         "github_unlocked": result.github_unlocked,
         "updated_at": now,
+        "last_bot_message_at": now,
+        "last_outbound_at": now,
+        **(result.patch or {}),
     }
     if result.github_username:
         patch["github_username"] = result.github_username
-    if result.rejection_due_at:
-        patch["rejection_due_at"] = result.rejection_due_at
-    if result.reply:
-        patch["last_bot_message_at"] = now
-        sb_insert(
-            "fm_messages",
-            {
-                "applicant_id": applicant["id"],
-                "role": "bot",
-                "body": result.reply,
-            },
-            return_representation=False,
-        )
+    if result.patch.get("opted_out"):
+        _record_opt_out(bot_id, applicant)
+        patch["status"] = "closed"
+    if result.action == "handoff":
+        patch["status"] = "closed"
+
+    sb_insert(
+        "fm_messages",
+        {
+            "applicant_id": applicant["id"],
+            "role": "bot",
+            "body": result.reply,
+        },
+        return_representation=False,
+    )
     sb_patch(
         "fm_applicants",
         match={"id": f"eq.{applicant['id']}"},
@@ -1034,53 +1162,136 @@ def chat_turn(
         "github_unlocked": result.github_unlocked,
         "github_username": result.github_username,
         "invite_ok": result.invite_ok,
-        "rejection_due_at": result.rejection_due_at,
         "action": result.action,
+        "send_after_sec": result.send_after_sec,
+        "authorised": True,
     }
 
 
-@app.get("/api/bots/{bot_id}/chat/due")
-def chat_due(
+def _is_opted_out(bot_id: int, applicant: dict[str, Any]) -> bool:
+    keys = []
+    for k in ("profile_key", "conversation_id"):
+        v = (applicant.get(k) or "").strip()
+        if v:
+            keys.append(v)
+    name = (applicant.get("display_name") or "").strip()
+    if name:
+        keys.append(name)
+    for key in keys:
+        rows = sb_get(
+            "fm_opt_outs",
+            params={
+                "identity_key": f"eq.{key}",
+                "select": "id",
+                "limit": "1",
+            },
+        )
+        if rows:
+            return True
+        # also try lower name
+        if key == name and name:
+            rows = sb_get(
+                "fm_opt_outs",
+                params={
+                    "identity_key": f"eq.{name.lower()}",
+                    "select": "id",
+                    "limit": "1",
+                },
+            )
+            if rows:
+                return True
+    return bool(applicant.get("opted_out"))
+
+
+def _record_opt_out(bot_id: int, applicant: dict[str, Any]) -> None:
+    now = _now()
+    identities = []
+    for k in ("profile_key", "conversation_id"):
+        v = (applicant.get(k) or "").strip()
+        if v:
+            identities.append(v)
+    name = (applicant.get("display_name") or "").strip()
+    if name:
+        identities.append(name.lower())
+    for ident in identities:
+        try:
+            sb_insert(
+                "fm_opt_outs",
+                {
+                    "bot_id": bot_id,
+                    "identity_key": ident,
+                    "display_name": applicant.get("display_name"),
+                    "created_at": now,
+                },
+                return_representation=False,
+            )
+        except Exception:
+            logger.exception("opt-out insert failed for %s", ident)
+
+
+@app.get("/api/bots/{bot_id}/chat/follow-ups")
+def chat_follow_ups(
     bot_id: int,
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Applicants with due rejection messages (1–2 days after assignment received)."""
+    """SPEC: at most one 48h follow-up after a candidate has replied at least once."""
     auth.require_bot(bot_id, authorization)
     _require_supabase()
+    from src.assessment.engine import build_follow_up
+
     rows = sb_get(
         "fm_applicants",
         params={
             "bot_id": f"eq.{bot_id}",
-            "stage": "eq.rejection_scheduled",
+            "status": "eq.active",
+            "follow_up_sent": "eq.false",
             "select": "*",
-            "order": "rejection_due_at.asc",
             "limit": "50",
         },
     )
-    now = datetime.now(timezone.utc)
+    # PostgREST may not filter null follow_up_sent with eq.false — also fetch nulls
+    if not rows:
+        rows = sb_get(
+            "fm_applicants",
+            params={
+                "bot_id": f"eq.{bot_id}",
+                "status": "eq.active",
+                "select": "*",
+                "order": "updated_at.asc",
+                "limit": "80",
+            },
+        )
     due: list[dict] = []
-    for row in rows:
-        raw = row.get("rejection_due_at")
-        if not raw:
+    for row in rows or []:
+        if row.get("follow_up_sent"):
             continue
-        try:
-            due_dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        except ValueError:
-            continue
-        if due_dt <= now:
-            due.append(row)
-    return {"applicants": due}
+        built = build_follow_up(row)
+        if built and built.authorised and built.reply:
+            due.append(
+                {
+                    "applicant": row,
+                    "reply": built.reply,
+                    "send_after_sec": built.send_after_sec or 120,
+                    "patch": built.patch,
+                    "stage": built.stage,
+                    "message_count": built.message_count,
+                }
+            )
+    return {"follow_ups": due}
 
 
-@app.post("/api/bots/{bot_id}/chat/due/{applicant_id}")
-def chat_due_send(
+@app.post("/api/bots/{bot_id}/chat/follow-ups/{applicant_id}")
+def chat_follow_up_send(
     bot_id: int,
     applicant_id: int,
+    body: FollowUpDeliverBody | None = None,
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Generate the scheduled rejection reply for a due applicant."""
+    """Authorise follow-up text; persist only when extension reports delivered=true."""
     auth.require_bot(bot_id, authorization)
     _require_supabase()
+    from src.assessment.engine import build_follow_up
+
     rows = sb_get(
         "fm_applicants",
         params={
@@ -1093,47 +1304,44 @@ def chat_due_send(
     if not rows:
         raise HTTPException(404, "applicant not found")
     applicant = rows[0]
-    history = sb_get(
-        "fm_messages",
-        params={
-            "applicant_id": f"eq.{applicant_id}",
-            "select": "role,body,created_at",
-            "order": "id.asc",
-            "limit": "80",
-        },
-    )
-    result = process_freelancer_message(
-        applicant=applicant,
-        messages=history,
-        freelancer_text="",
-        unlock_after=_bot_settings(bot_id).github_unlock_after_messages,
-        max_messages=_bot_settings(bot_id).max_messages_per_applicant,
-    )
+    built = build_follow_up(applicant)
+    if not built or not built.authorised or not built.reply:
+        return {"reply": None, "action": "noop", "authorised": False}
+    delivered = bool(body and body.delivered)
+    if not delivered:
+        return {
+            "reply": built.reply,
+            "action": "follow_up",
+            "authorised": True,
+            "send_after_sec": built.send_after_sec,
+            "conversation_id": applicant.get("conversation_id"),
+        }
     now = _now()
-    if result.reply:
-        sb_insert(
-            "fm_messages",
-            {"applicant_id": applicant_id, "role": "bot", "body": result.reply},
-            return_representation=False,
-        )
+    sb_insert(
+        "fm_messages",
+        {"applicant_id": applicant_id, "role": "bot", "body": built.reply},
+        return_representation=False,
+    )
     sb_patch(
         "fm_applicants",
         match={"id": f"eq.{applicant_id}"},
         row={
-            "stage": result.stage,
-            "message_count": result.message_count,
+            "follow_up_sent": True,
+            "message_count": built.message_count,
+            "last_bot_message_at": now,
+            "last_outbound_at": now,
             "updated_at": now,
-            "last_bot_message_at": now if result.reply else applicant.get("last_bot_message_at"),
-            "status": "closed" if result.stage == "rejected" else applicant.get("status"),
+            **(built.patch or {}),
         },
         return_representation=False,
     )
     return {
-        "applicant_id": applicant_id,
-        "reply": result.reply,
-        "stage": result.stage,
-        "action": result.action,
+        "reply": built.reply,
+        "action": "follow_up",
+        "authorised": True,
+        "send_after_sec": built.send_after_sec,
         "conversation_id": applicant.get("conversation_id"),
+        "delivered": True,
     }
 
 

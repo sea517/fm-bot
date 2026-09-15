@@ -47,23 +47,32 @@
     el.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
-  /** Per-reply delay: random 5–120s, longer answers bias toward the high end. */
+  /** SPEC: reply delay 2–10 minutes; prefer send_after_sec from Control API. */
   let lastReplyDelayMs = 0;
-  function replyDelayMs(text) {
+  function replyDelayMs(text, sendAfterSec) {
+    const minSec = 120;
+    const maxSec = 600;
+    if (
+      typeof sendAfterSec === "number" &&
+      Number.isFinite(sendAfterSec) &&
+      sendAfterSec >= minSec &&
+      sendAfterSec <= maxSec
+    ) {
+      lastReplyDelayMs = Math.round(sendAfterSec * 1000);
+      return lastReplyDelayMs;
+    }
     const raw = (text || "").trim();
     const words = raw ? raw.split(/\s+/).length : 0;
     const chars = raw.length;
     const lengthFactor = Math.min(1, words / 80 + chars / 1200);
-    const minSec = 5;
-    const maxSec = 120;
     const span = maxSec - minSec;
     const center = minSec + span * (0.15 + lengthFactor * 0.7);
     const spread = span * 0.45;
     let sec = center + (Math.random() * 2 - 1) * spread;
     sec = Math.max(minSec, Math.min(maxSec, sec));
     let ms = Math.round(sec * 1000);
-    if (Math.abs(ms - lastReplyDelayMs) < 3000) {
-      const bump = 5000 + Math.floor(Math.random() * 25000);
+    if (Math.abs(ms - lastReplyDelayMs) < 15000) {
+      const bump = 30000 + Math.floor(Math.random() * 90000);
       ms = Math.max(
         minSec * 1000,
         Math.min(maxSec * 1000, ms + (Math.random() < 0.5 ? bump : -bump))
@@ -71,7 +80,7 @@
     }
     ms = Math.max(
       minSec * 1000,
-      Math.min(maxSec * 1000, ms + Math.floor(Math.random() * 7000) - 3500)
+      Math.min(maxSec * 1000, ms + Math.floor(Math.random() * 20000) - 10000)
     );
     lastReplyDelayMs = ms;
     return ms;
@@ -262,8 +271,8 @@
     }
   }
 
-  async function sendReply(text) {
-    const delay = replyDelayMs(text);
+  async function sendReply(text, sendAfterSec) {
+    const delay = replyDelayMs(text, sendAfterSec);
     console.info("[FM Chat] waiting", Math.round(delay / 1000), "s before send");
     await sleep(delay);
 
@@ -296,11 +305,17 @@
       "Okay. Our team members will review your answer.",
       "Okay. Our team will review your answers.",
       "I invited you to the assignment",
+      "I invited you to the assessment repository",
       "Invited you to the assignment",
       "Thank you for your work",
+      "Thanks — we received that",
       "We will continue with another candidate",
       "Please send your GitHub username",
       "Please share your github username",
+      "The next step is a short practical assessment",
+      "I could not find that GitHub user",
+      "That link points to an organisation account",
+      "I am setting up the invite",
     ];
     const lastTrim = last.trim();
     if (
@@ -328,8 +343,8 @@
       profile_key: null,
       message: messageBlob,
     });
-    if (!res?.reply) {
-      if (res?.action === "duplicate") {
+    if (!res?.reply || res.authorised === false) {
+      if (res?.action === "duplicate" || res?.action === "coalesced") {
         fps[meta.id] = fingerprint;
         await chrome.storage.local.set({ chatFingerprints: fps });
       }
@@ -342,7 +357,7 @@
         error: res?.error || null,
       };
     }
-    const sent = await sendReply(res.reply);
+    const sent = await sendReply(res.reply, res.send_after_sec);
     if (sent.ok) {
       fps[meta.id] = fingerprint;
       await chrome.storage.local.set({ chatFingerprints: fps });
@@ -362,21 +377,6 @@
     running = true;
     const results = [];
     try {
-      try {
-        const due = await chrome.runtime.sendMessage({ type: "FM_CHAT_DUE" });
-        for (const item of due?.items || []) {
-          if (item.conversation_id && item.reply) {
-            const opened = await openConversation(item.conversation_id);
-            if (opened) {
-              await sendReply(item.reply);
-              results.push({ id: item.conversation_id, action: "rejected" });
-            }
-          }
-        }
-      } catch (_e) {
-        /* ignore */
-      }
-
       await ensureInboxList();
       // Snapshot IDs first (DOM nodes go stale after open/reload)
       const snapshot = listConversationRows().slice(0, 12);
@@ -414,6 +414,23 @@
       runInboxPass()
         .then((r) => sendResponse(r))
         .catch((e) => sendResponse({ ok: false, reason: String(e) }));
+      return true;
+    }
+    if (msg?.type === "FM_CHAT_SEND") {
+      (async () => {
+        try {
+          const opened = await openConversation(String(msg.conversation_id));
+          if (!opened) {
+            sendResponse({ ok: false, reason: "open_failed" });
+            return;
+          }
+          await sleep(1000);
+          const sent = await sendReply(msg.text, msg.send_after_sec);
+          sendResponse(sent);
+        } catch (e) {
+          sendResponse({ ok: false, reason: String(e) });
+        }
+      })();
       return true;
     }
     if (msg?.type === "FM_CHAT_PING") {

@@ -91,25 +91,124 @@
   }
 
   function randomIntervalMs(minSec, maxSec) {
-    const a = Math.max(1, Number(minSec) || 240);
+    const a = Math.max(1, Number(minSec) || 360);
     const b = Math.max(a, Number(maxSec) || a);
     const sec = a + Math.floor(Math.random() * (b - a + 1));
     return sec * 1000;
   }
 
-  /** Random pause between outreach UI steps — disabled; only DM interval remains. */
+  /** Account-safety floors (live sends). Dry-run may go faster. */
+  const SAFETY = {
+    minDmSec: 360, // 6 min between real DMs
+    maxDmSec: 540, // 9 min
+    stepMinMs: 1800,
+    stepMaxMs: 4800,
+    skipMinSec: 25,
+    skipMaxSec: 55,
+    failMinSec: 70,
+    failMaxSec: 140,
+    openFailMinSec: 50,
+    openFailMaxSec: 110,
+    maxConsecutiveFails: 4,
+    maxConsecutiveOpenFails: 5,
+    dailySendCap: 25,
+  };
+
+  function clampDmInterval(settings) {
+    const dry = isDryRun(settings);
+    let minSec = Number(settings.minIntervalSec) || SAFETY.minDmSec;
+    let maxSec = Number(settings.maxIntervalSec) || SAFETY.maxDmSec;
+    if (!dry) {
+      minSec = Math.max(minSec, SAFETY.minDmSec);
+      maxSec = Math.max(maxSec, minSec, SAFETY.maxDmSec);
+    } else {
+      minSec = Math.max(minSec, 30);
+      maxSec = Math.max(maxSec, minSec);
+    }
+    return { minSec, maxSec };
+  }
+
+  /** Random human-like pause between outreach UI steps. */
   function stepDelayMs() {
-    return 0;
+    const span = SAFETY.stepMaxMs - SAFETY.stepMinMs;
+    return SAFETY.stepMinMs + Math.floor(Math.random() * (span + 1));
   }
 
   async function pauseStep(label) {
     await touchCampaignAlive();
     if (await shouldStop()) return false;
-    // No per-action wait; anti-spam delay is only waitBetweenDms (240–300s).
+    const ms = stepDelayMs();
     if (label) {
-      /* kept for call-site clarity; intentionally not logged as a wait */
+      await emitLog(`Pace ${Math.round(ms / 1000)}s (${label})`);
+    }
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (await shouldStop()) return false;
+      await sleep(Math.min(500, end - Date.now()));
+      await touchCampaignAlive();
     }
     return true;
+  }
+
+  async function waitSeconds(secMin, secMax, label) {
+    const ms = randomIntervalMs(secMin, secMax);
+    await emitLog(
+      `Account safety wait ${Math.round(ms / 1000)}s${label ? ` — ${label}` : ""}…`
+    );
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (await shouldStop()) return false;
+      await sleep(Math.min(1000, end - Date.now()));
+      await touchCampaignAlive();
+    }
+    return true;
+  }
+
+  function todayKey() {
+    return new Date().toISOString().slice(0, 10);
+  }
+
+  async function getDailySentCount() {
+    try {
+      const { outreachDaily } = await chrome.storage.local.get({
+        outreachDaily: null,
+      });
+      if (!outreachDaily || outreachDaily.day !== todayKey()) return 0;
+      return Number(outreachDaily.sent) || 0;
+    } catch (_e) {
+      return 0;
+    }
+  }
+
+  async function bumpDailySent() {
+    try {
+      const day = todayKey();
+      const { outreachDaily } = await chrome.storage.local.get({
+        outreachDaily: null,
+      });
+      const prev =
+        outreachDaily && outreachDaily.day === day
+          ? Number(outreachDaily.sent) || 0
+          : 0;
+      await chrome.storage.local.set({
+        outreachDaily: { day, sent: prev + 1 },
+      });
+    } catch (_e) {
+      /* ignore */
+    }
+  }
+
+  async function assertDailyCap(settings) {
+    if (isDryRun(settings)) return { ok: true };
+    const sent = await getDailySentCount();
+    if (sent >= SAFETY.dailySendCap) {
+      await emitLog(
+        `Daily send cap reached (${sent}/${SAFETY.dailySendCap}). Stopping to protect the account.`,
+        "warn"
+      );
+      return { ok: false, reason: "daily_cap" };
+    }
+    return { ok: true, sent };
   }
 
   async function clickResetAll() {
@@ -478,6 +577,25 @@
     return false;
   }
 
+  function profileIdFromHref(href) {
+    if (!href) return null;
+    try {
+      const u = new URL(href, location.href);
+      const id = u.searchParams.get("id");
+      if (id && /^\d+$/.test(id)) return id;
+      const path = u.pathname || "";
+      // /profile/12345 or /profile/slug-12345
+      let m = path.match(/\/profile\/(?:[^/]*-)?(\d+)\/?$/i);
+      if (m) return m[1];
+      m = path.match(/\/freelancer\/(?:[^/]*-)?(\d+)\/?$/i);
+      if (m) return m[1];
+    } catch (_e) {
+      /* ignore */
+    }
+    const m = String(href).match(/[?&]id=(\d+)/i);
+    return m ? m[1] : null;
+  }
+
   function profileIdFromEl(el) {
     if (!el) return null;
     const scope =
@@ -489,15 +607,8 @@
       ...qsa("a[href]", scope).map((a) => a.getAttribute("href")),
     ].filter(Boolean);
     for (const href of hrefs) {
-      try {
-        const u = new URL(href, location.href);
-        const id = u.searchParams.get("id");
-        if (id && /^\d+$/.test(id)) return id;
-      } catch (_e) {
-        /* ignore */
-      }
-      const m = String(href).match(/[?&]id=(\d+)/i);
-      if (m) return m[1];
+      const id = profileIdFromHref(href);
+      if (id) return id;
     }
     for (const node of [scope, el, ...qsa("[data-profile-id], [data-id]", scope)]) {
       for (const attr of ["data-profile-id", "data-freelancer-id", "data-id"]) {
@@ -570,7 +681,10 @@
     if (!t) return false;
     if (t === "contact" || t === "kontaktieren" || t === "kontakt") return true;
     // Short labels only — avoid "show contact details" / long sentences.
-    if (t.length <= 22 && /^(contact|kontaktieren|kontakt)\b/.test(t)) {
+    if (
+      t.length <= 28 &&
+      /^(contact|kontaktieren|kontakt|contact\s+now|nachricht\s+senden)\b/.test(t)
+    ) {
       return true;
     }
     return false;
@@ -580,15 +694,23 @@
   function findContactButton(root = null) {
     const scope = root || profileModalRoot() || document;
     const nodes = qsa(
-      "button, a, [role='button'], [data-id*='contact'], [data-testid*='contact']",
+      "button, a, [role='button'], [data-id*='contact'], [data-testid*='contact'], [data-id*='kontakt']",
       scope
     );
     const matches = nodes.filter((el) => {
       if (!visible(el)) return false;
+      const text = elText(el);
+      if (/show\s+contact\s+details|watchlist|add\s+note/i.test(text)) return false;
       const label = `${el.getAttribute("aria-label") || ""} ${
         el.getAttribute("title") || ""
       }`;
-      return isContactLabel(elText(el)) || isContactLabel(label);
+      const dataId = el.getAttribute("data-id") || el.getAttribute("data-testid") || "";
+      if (/show.*contact.*detail/i.test(dataId)) return false;
+      return (
+        isContactLabel(text) ||
+        isContactLabel(label) ||
+        (/^(contact|kontaktieren|kontakt)$/i.test(dataId) && text.length <= 28)
+      );
     });
     // Prefer controls inside a dialog when searching the whole document.
     if (!root && matches.length > 1) {
@@ -619,27 +741,95 @@
     return null;
   }
 
+  async function openSerpProfileById(profileId, keyword) {
+    const id = String(profileId || "").trim();
+    if (!/^\d+$/.test(id)) return false;
+    const u = new URL(location.href);
+    // Stay on the SERP listing — never open /profile/... (that spawned new tabs).
+    u.pathname = "/freelancer";
+    u.hash = "";
+    if (keyword) u.searchParams.set("query", String(keyword).trim());
+    u.searchParams.set("id", id);
+    const next = u.toString();
+    if (next !== location.href) {
+      location.assign(next);
+      await sleep(2200);
+    } else if (!profilePanelOpen() && !findContactButton()) {
+      location.reload();
+      await sleep(2500);
+    }
+    if (await waitForContactButton(10000)) return true;
+    return profilePanelOpen();
+  }
+
   async function openCardProfile(entry, keyword) {
     const before = location.href;
-    // Prefer clicking the official card title — FM opens the SERP modal.
-    entry.el.scrollIntoView({ block: "center", behavior: "instant" });
-    entry.el.click();
-    for (let i = 0; i < 25; i++) {
-      await sleep(400);
-      if (profilePanelOpen() || findContactButton()) break;
-    }
-    if (await waitForContactButton(8000)) return true;
-    if (profilePanelOpen()) return true;
+    const profileId =
+      entry.profileId ||
+      profileIdFromEl(entry.el) ||
+      profileIdFromHref(entry.el.getAttribute?.("href"));
 
-    // Fallback: navigate with &id= when we know the numeric id
-    if (entry.profileId) {
-      const u = new URL(location.href);
-      if (keyword) u.searchParams.set("query", keyword);
-      u.searchParams.set("id", String(entry.profileId));
-      location.assign(u.toString());
-      await sleep(2500);
-      if (await waitForContactButton(10000)) return true;
+    // Same-tab SERP modal via ?id= — do NOT click <a href="/profile/..."> (opens new tabs).
+    if (profileId) {
+      await emitLog(`Opening profile id=${profileId} on SERP (same tab)`);
+      if (await openSerpProfileById(profileId, keyword)) return true;
+    }
+
+    // Last resort: in-page click with new-tab blocked
+    const el = entry.el;
+    if (!el) return false;
+    const prevTarget = el.getAttribute?.("target");
+    try {
+      el.removeAttribute?.("target");
+    } catch (_e) {
+      /* ignore */
+    }
+    const prevOpen = window.open;
+    window.open = () => null;
+    const blocker = (e) => {
+      if (e.button === 1 || e.metaKey || e.ctrlKey || e.shiftKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      // Keep React handlers; cancel browser navigation to /profile
+      const href = el.getAttribute?.("href") || "";
+      if (/\/profile\//i.test(href) || el.getAttribute("target") === "_blank") {
+        e.preventDefault();
+      }
+    };
+    el.addEventListener("click", blocker, true);
+    try {
+      el.scrollIntoView({ block: "center", behavior: "instant" });
+      el.dispatchEvent(
+        new MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          button: 0,
+        })
+      );
+      for (let i = 0; i < 20; i++) {
+        await sleep(350);
+        if (profilePanelOpen() || findContactButton()) break;
+        // If FM navigated this tab to /profile, bail back to SERP
+        if (/\/profile\//i.test(location.pathname)) {
+          history.back();
+          await sleep(1500);
+          break;
+        }
+      }
+      if (await waitForContactButton(6000)) return true;
       if (profilePanelOpen()) return true;
+      if (profileId && (await openSerpProfileById(profileId, keyword))) return true;
+    } finally {
+      el.removeEventListener("click", blocker, true);
+      window.open = prevOpen;
+      try {
+        if (prevTarget != null) el.setAttribute("target", prevTarget);
+      } catch (_e) {
+        /* ignore */
+      }
     }
     if (location.href !== before && !/[?&]id=\d+/i.test(location.search)) {
       history.back();
@@ -1236,6 +1426,8 @@
         name: info.name,
         profileKey: info.profileKey,
         projectName: settings.projectName || null,
+        subject,
+        body,
       });
     } catch (_e) {
       /* ignore ledger errors */
@@ -1250,17 +1442,16 @@
   }
 
   async function waitBetweenDms(settings) {
-    const waitMs = randomIntervalMs(
-      settings.minIntervalSec,
-      settings.maxIntervalSec
-    );
+    const { minSec, maxSec } = clampDmInterval(settings);
+    const waitMs = randomIntervalMs(minSec, maxSec);
     await emitLog(
-      `Waiting ${Math.round(waitMs / 1000)}s before next DM (random ${settings.minIntervalSec}–${settings.maxIntervalSec}s)…`
+      `Waiting ${Math.round(waitMs / 1000)}s before next DM (safe band ${minSec}–${maxSec}s)…`
     );
     const end = Date.now() + waitMs;
     while (Date.now() < end) {
       if (await shouldStop()) return false;
       await sleep(Math.min(1000, end - Date.now()));
+      await touchCampaignAlive();
     }
     return true;
   }
@@ -1272,6 +1463,62 @@
       reason === "no_profile_name" ||
       reason === "contact_button_missing" ||
       reason === "contact_form_missing"
+    );
+  }
+
+  /**
+   * Pace after each attempt. Never rush failed opens — that pattern triggers bans.
+   * Returns false if the campaign should stop.
+   */
+  async function paceAfterAttempt(settings, result, counters) {
+    if (result?.ok) {
+      counters.consecutiveFails = 0;
+      counters.consecutiveOpenFails = 0;
+      if (!isDryRun(settings)) await bumpDailySent();
+      return waitBetweenDms(settings);
+    }
+
+    const reason = result?.reason || "failed";
+    if (reason === "stopped" || reason === "daily_cap") return false;
+
+    if (reason === "open_failed" || reason === "contact_button_missing") {
+      counters.consecutiveOpenFails = (counters.consecutiveOpenFails || 0) + 1;
+      counters.consecutiveFails = (counters.consecutiveFails || 0) + 1;
+      if (counters.consecutiveOpenFails >= SAFETY.maxConsecutiveOpenFails) {
+        await emitLog(
+          `Stopping — ${counters.consecutiveOpenFails} consecutive open/Contact failures (account safety).`,
+          "warn"
+        );
+        return false;
+      }
+      return waitSeconds(
+        SAFETY.openFailMinSec,
+        SAFETY.openFailMaxSec,
+        `after ${reason}`
+      );
+    }
+
+    if (isQuickSkipReason(reason)) {
+      counters.consecutiveFails = 0;
+      return waitSeconds(
+        SAFETY.skipMinSec,
+        SAFETY.skipMaxSec,
+        `after skip (${reason})`
+      );
+    }
+
+    counters.consecutiveFails = (counters.consecutiveFails || 0) + 1;
+    if (counters.consecutiveFails >= SAFETY.maxConsecutiveFails) {
+      await emitLog(
+        `Stopping — ${counters.consecutiveFails} consecutive failures (account safety).`,
+        "warn"
+      );
+      return false;
+    }
+    return waitSeconds(
+      SAFETY.failMinSec,
+      SAFETY.failMaxSec,
+      `after failure (${reason})`
     );
   }
 
@@ -1317,6 +1564,10 @@
     await emitLog(
       `Campaign start · dry_run=${dry} · skipSearch=${Boolean(settings.skipSearch)} · keyword=${JSON.stringify(settings.keyword || "")}`
     );
+    const { minSec, maxSec } = clampDmInterval(settings);
+    await emitLog(
+      `Account safety: DM interval ≥${minSec}–${maxSec}s · daily cap ${SAFETY.dailySendCap} · step pace ${SAFETY.stepMinMs / 1000}–${SAFETY.stepMaxMs / 1000}s`
+    );
 
     const stats = {
       attempted: 0,
@@ -1328,6 +1579,17 @@
     };
     let finishStatus = "completed";
     let finishError = null;
+    const safetyCounters = { consecutiveFails: 0, consecutiveOpenFails: 0 };
+
+    const cap0 = await assertDailyCap(settings);
+    if (!cap0.ok) {
+      finishStatus = "stopped";
+      finishError = "daily_cap";
+      await finishJob(finishStatus, stats, finishError);
+      campaignRunning = false;
+      activeJobId = null;
+      return { ok: false, reason: "daily_cap", stats };
+    }
 
     async function pushLiveStats(extra = {}) {
       Object.assign(stats, extra);
@@ -1381,12 +1643,18 @@
 
       if (settings.resumeProfile) {
         // Jump straight into Contact on the already-open profile.
-        const limit = Math.max(1, Number(settings.limit) || 10);
-        const maxAttempts = Math.max(limit * 8, limit + 30);
+        const limit = Math.max(1, Number(settings.limit) || 5);
+        const maxAttempts = Math.max(limit * 3, limit + 8);
         let fallThroughToList = false;
         while (stats.sent < limit && stats.attempted < maxAttempts) {
           if (await shouldStop()) {
             finishStatus = "stopped";
+            break;
+          }
+          const cap = await assertDailyCap(settings);
+          if (!cap.ok) {
+            finishStatus = "stopped";
+            finishError = "daily_cap";
             break;
           }
           stats.attempted += 1;
@@ -1455,16 +1723,9 @@
             fallThroughToList = true;
             break;
           }
-          // Full anti-spam wait only after a real send; skips move on quickly.
-          if (result.ok) {
-            if (!(await waitBetweenDms(settings))) {
-              finishStatus = "stopped";
-              break;
-            }
-          } else if (isQuickSkipReason(result.reason)) {
-            await sleep(1200);
-          } else if (!(await waitBetweenDms(settings))) {
+          if (!(await paceAfterAttempt(settings, result, safetyCounters))) {
             finishStatus = "stopped";
+            finishError = finishError || "account_safety_stop";
             break;
           }
         }
@@ -1513,8 +1774,8 @@
         return { ok: false, reason: "no_profile_cards", stats };
       }
 
-      const limit = Math.max(1, Number(settings.limit) || 10);
-      const maxAttempts = Math.max(limit * 8, limit + 30);
+      const limit = Math.max(1, Math.min(Number(settings.limit) || 5, 40));
+      const maxAttempts = Math.max(limit * 3, limit + 8);
       let openedFirst = false;
       let titleIndex = 0;
 
@@ -1522,6 +1783,12 @@
         if (await shouldStop()) {
           await emitLog("Campaign stopped.");
           finishStatus = "stopped";
+          break;
+        }
+        const cap = await assertDailyCap(settings);
+        if (!cap.ok) {
+          finishStatus = "stopped";
+          finishError = "daily_cap";
           break;
         }
 
@@ -1562,21 +1829,45 @@
             const opened = await openCardProfile(entry, settings.keyword || "");
             if (!opened) {
               stats.failed += 1;
+              await pushLiveStats();
               await emitLog(
                 `Failed to open profile modal for: ${entry.text.slice(0, 80)}`,
                 "warn"
               );
+              if (
+                !(await paceAfterAttempt(
+                  settings,
+                  { ok: false, reason: "open_failed" },
+                  safetyCounters
+                ))
+              ) {
+                finishStatus = "stopped";
+                finishError = "account_safety_stop";
+                break;
+              }
               continue;
             }
             await emitLog("Profile modal open — looking for Contact…");
             const contactReady = await waitForContactButton(10000);
             if (!contactReady) {
               stats.failed += 1;
+              await pushLiveStats();
               await emitLog(
                 "Profile modal open but Contact button not found.",
                 "warn"
               );
               await closeModal();
+              if (
+                !(await paceAfterAttempt(
+                  settings,
+                  { ok: false, reason: "contact_button_missing" },
+                  safetyCounters
+                ))
+              ) {
+                finishStatus = "stopped";
+                finishError = "account_safety_stop";
+                break;
+              }
               continue;
             }
             await emitLog("Contact button visible on modal.");
@@ -1675,15 +1966,9 @@
             }
           }
 
-          if (result.ok) {
-            if (!(await waitBetweenDms(settings))) {
-              finishStatus = "stopped";
-              break;
-            }
-          } else if (isQuickSkipReason(result.reason)) {
-            await sleep(1200);
-          } else if (!(await waitBetweenDms(settings))) {
+          if (!(await paceAfterAttempt(settings, result, safetyCounters))) {
             finishStatus = "stopped";
+            finishError = finishError || "account_safety_stop";
             break;
           }
         } catch (err) {
@@ -1692,6 +1977,17 @@
           await emitLog(`Error on profile: ${err}`, "error");
           await closeModal();
           openedFirst = false;
+          if (
+            !(await paceAfterAttempt(
+              settings,
+              { ok: false, reason: "error" },
+              safetyCounters
+            ))
+          ) {
+            finishStatus = "stopped";
+            finishError = "account_safety_stop";
+            break;
+          }
         }
       }
 
@@ -1732,7 +2028,17 @@
       }
       if (!/freelancermap\.(com|de)/i.test(location.hostname)) return;
       if (!/\/freelancer/i.test(location.pathname + location.href)) return;
+      // Never resume on /profile/... tabs (those were accidental new tabs).
+      if (/\/profile\//i.test(location.pathname)) return;
       if (campaignRunning) return;
+
+      // Only the dedicated outreach tab may resume — blocks tab-flood loops.
+      try {
+        const who = await chrome.runtime.sendMessage({ type: "FM_AM_I_OUTREACH" });
+        if (who && who.ok === false) return;
+      } catch (_e) {
+        /* ignore */
+      }
 
       const phase = store.pendingCampaign.phase || "search";
       const onProfile =

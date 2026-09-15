@@ -81,7 +81,18 @@ def active_ai_provider() -> str:
 
 # GitHub repo collaborator invites (use Personal Access Token, not password)
 GITHUB_TOKEN = _optional("GITHUB_TOKEN")
-GITHUB_REPO = _optional("GITHUB_REPO", "Kontrora-Group/full-stack-assignment")
+GITHUB_REPO = _optional("GITHUB_REPO", "creativesolution999/full-stack-assignment")
+# SPEC secrets (org invite + assessment repo). Fall back to GITHUB_REPO owner/name.
+GITHUB_ORG = _optional("GITHUB_ORG", "").strip() or (
+    GITHUB_REPO.split("/", 1)[0] if GITHUB_REPO and "/" in GITHUB_REPO else ""
+)
+ASSESSMENT_REPO = _optional("ASSESSMENT_REPO", "").strip() or (
+    GITHUB_REPO.split("/", 1)[1] if GITHUB_REPO and "/" in GITHUB_REPO else ""
+)
+
+# Telegram handoff alerts (numeric chat id, not a username)
+TELEGRAM_BOT_TOKEN = _optional("TELEGRAM_BOT_TOKEN").strip().strip('"').strip("'")
+TELEGRAM_CHAT_ID = _optional("TELEGRAM_CHAT_ID").strip().strip('"').strip("'")
 
 # Job posting from .env
 PROJECT_TITLE = _optional(

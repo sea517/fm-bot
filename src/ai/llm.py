@@ -171,14 +171,19 @@ def generate(
     user: str,
     max_tokens: int | None = None,
     temperature: float | None = None,
+    provider: str | None = None,
 ) -> str:
-    provider = active_ai_provider()
+    chosen = (provider or active_ai_provider()).strip().lower()
+    # SPEC assessment path pins OpenRouter; never fall back to Gemini there.
+    if chosen not in ("openrouter", "gemini"):
+        chosen = active_ai_provider()
     last_error: Exception | None = None
     tokens = max_tokens if max_tokens is not None else MAX_TOKENS
     temp = 0.35 if temperature is None else float(temperature)
-    for attempt in (1, 2, 3):
+    attempts = (1,) if provider == "openrouter" else (1, 2, 3)
+    for attempt in attempts:
         try:
-            if provider == "openrouter":
+            if chosen == "openrouter":
                 return _generate_openrouter(
                     system, user, max_tokens=tokens, temperature=temp
                 )

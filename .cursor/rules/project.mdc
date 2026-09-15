@@ -1,0 +1,9 @@
+---
+alwaysApply: true
+---
+SPEC.md is authoritative. Read it before writing code.
+policy/chat-policy.md is a runtime asset. Load it from disk. Never inline it
+into source, never edit it, never summarise it.
+Rules in SPEC.md's layer table marked Code must be enforced in code, never by
+prompt instructions. The Do not build section is binding.
+Ask before deviating from the spec.

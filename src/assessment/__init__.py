@@ -5,7 +5,6 @@ from src.assessment.templates import (
     MSG_ASK_GITHUB,
     MSG_ASSIGNMENT_INVITED,
     MSG_ASSIGNMENT_RECEIVED,
-    rejection_message,
 )
 
 __all__ = [
@@ -13,5 +12,4 @@ __all__ = [
     "MSG_ASK_GITHUB",
     "MSG_ASSIGNMENT_INVITED",
     "MSG_ASSIGNMENT_RECEIVED",
-    "rejection_message",
 ]

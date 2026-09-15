@@ -53,7 +53,7 @@ In Vercel → Project → **Settings → Environment Variables**, set for Produc
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` |
 | `AI_PROVIDER` | `openrouter` |
 | `GITHUB_TOKEN` | PAT with `repo` scope (invite collaborators) |
-| `GITHUB_REPO` | `Kontrora-Group/full-stack-assignment` |
+| `GITHUB_REPO` | `creativesolution999/full-stack-assignment` |
 
 `CONTROL_HOST` / `CONTROL_PORT` are unused on Vercel.
 

@@ -40,10 +40,15 @@ function statusBadge(status) {
   return `<span class="badge ${s}">${s}</span>`;
 }
 
-function activityBadge(running) {
-  return running
-    ? `<span class="badge running">running</span>`
-    : `<span class="badge rest">rest</span>`;
+function activityBadge(job) {
+  if (!job) return `<span class="badge rest">rest</span>`;
+  if (job.status === "queued") {
+    return `<span class="badge rest">waiting for extension</span>`;
+  }
+  if (job.status === "cancel_requested") {
+    return `<span class="badge rest">stopping</span>`;
+  }
+  return `<span class="badge running">running</span>`;
 }
 
 /** Job still owns the bot (show Stop). */
@@ -149,15 +154,24 @@ async function refreshBot() {
   const running = Boolean(job);
   setRunControls(running);
 
+  const hbAgeMs = bot.last_heartbeat_at
+    ? Date.now() - Date.parse(bot.last_heartbeat_at)
+    : null;
+  const extensionStale =
+    job?.status === "queued" && (hbAgeMs == null || hbAgeMs > 45000);
+
   const jobLine = job
     ? `Job #${job.id} [${job.status}] keyword="${job.keyword}" dry_run=${job.dry_run}`
     : bot.current_job
       ? `Last: #${bot.current_job.id} [${bot.current_job.status}]`
       : "No current job";
   $("botCard").innerHTML =
-    `<div><strong>${bot.label || "Bot " + bot.id}</strong> ${statusBadge(bot.status)} ${activityBadge(running)}</div>` +
+    `<div><strong>${bot.label || "Bot " + bot.id}</strong> ${statusBadge(bot.status)} ${activityBadge(job)}</div>` +
     `<div>Last heartbeat: ${bot.last_heartbeat_at || "—"}</div>` +
     `<div>${jobLine}</div>` +
+    (extensionStale
+      ? `<div style="color:#c97800">Queued — Chrome extension is not claiming. Open the extension popup → enable Poll dashboard → Save → Ping. Bot Id must match.</div>`
+      : "") +
     (bot.last_error ? `<div>Error: ${bot.last_error}</div>` : "");
 
   await refreshKeywordStats(job);

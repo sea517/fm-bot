@@ -1,4 +1,4 @@
-"""Slack / email conversation templates (ASD-STE100)."""
+"""Freelancermap conversation templates (ASD-STE100)."""
 
 MSG_FM_REPLY_3 = """We reviewed your background. It is relevant to our current product.
 Please contact our technical lead (oliver@kontrora.com) and send your resume.
@@ -7,36 +7,6 @@ In your email, write that Sabrina referred you after a resume review.
 Our technical lead will review your background. If there is a strong fit, they will send the next steps.
 
 Best regards"""
-
-MSG_EMAIL_PROCESS = """Hello,
-
-Thank you for your message and for your resume.
-
-We want to learn more about your technical experience and development skills.
-As the next step, we invite you to our team Slack workspace.
-Our technical team will guide you through the assessment there.
-
-Our technical process has three stages:
-
-1. Text-based technical discussion
-   We start with a discussion on Slack. This helps us understand your background, experience, and problem-solving approach.
-2. Practical assessment
-   If the discussion goes well, you receive a short take-home assignment. The assignment uses a simplified version of our stack. Plan about 2 to 3 hours.
-3. Technical interview
-   If your assessment results fit, we schedule a technical interview. This is often the next day. We discuss your implementation, decisions, and approach.
-
-Our team is available Monday through Friday, from 10:00 a.m. to 5:00 p.m. EDT.
-
-Please reply with:
-- the email address for the Slack invite
-- your availability to start stage 1
-
-After you join Slack, our technical team will explain the process and answer first questions."""
-
-MSG_SLACK_INVITED = (
-    "I sent the invite. Please check your email. "
-    "Tell me on Slack after you join."
-)
 
 MSG_ASK_AVAILABILITY = (
     "Hello. Welcome.\n\n"
@@ -82,8 +52,6 @@ Nearly half our route handlers use the service-role key, which bypasses RLS, and
 Our Next.js middleware only checks that an auth cookie exists, not that it is valid. Anyone can set a fake sb- cookie and pass it. Why might we have done that, where is the real security boundary in this architecture, and what breaks if a developer assumes the middleware protects a route?
 We cache permissions in an in-memory Map in the API process, and we want to run multiple API instances. Walk me through what happens when an admin revokes a user's role. On which instances does that take effect, and when? How would you fix the stale data without killing performance?"""
 
-MSG_TECH_TIME_PASSED = "The time limit passed."
-
 MSG_ASK_GITHUB = (
     "Okay. Our team will review your answers.\n"
     "Next, I will send a short take-home assignment. "
@@ -105,20 +73,10 @@ MSG_ASSIGNMENT_INVITED = (
     "I will review your work with our team in about 3 hours."
 )
 
-MSG_ASSIGNMENT_CHECK_IN = (
-    "Quick check: did you complete the assignment? "
-    "Please reply here after you submit, as the README describes."
-)
-
 MSG_ASSIGNMENT_RECEIVED = (
     "Okay. We will review your work and tell you the result in about 3 days."
 )
 
 MSG_ASSIGNMENT_FORK_ACCESS = "That is fine. You forked our repository."
-
-MSG_FINAL_REJECTION = """Hello,
-Thank you for your time on this assessment. We reviewed your work carefully. We will continue with another candidate for this role.
-We value your interest. We may contact you again for a future product that fits your skills.
-Thank you again. We wish you success."""
 
 TECH_QUESTIONS_TEXT = MSG_TECH_QUESTIONS

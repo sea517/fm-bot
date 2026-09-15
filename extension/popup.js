@@ -18,14 +18,14 @@ function readWorkerSettings() {
 }
 
 function readLocalSettings() {
-  const minInterval = Math.max(10, Number($("minInterval").value) || 240);
-  let maxInterval = Math.max(10, Number($("maxInterval").value) || 300);
+  const minInterval = Math.max(60, Number($("minInterval").value) || 360);
+  let maxInterval = Math.max(60, Number($("maxInterval").value) || 540);
   if (maxInterval < minInterval) maxInterval = minInterval;
   return {
     keyword: $("keyword").value.trim(),
     minIntervalSec: minInterval,
     maxIntervalSec: maxInterval,
-    limit: Math.max(1, Math.min(200, Number($("limit").value) || 10)),
+    limit: Math.max(1, Math.min(40, Number($("limit").value) || 5)),
     dryRun: $("dryRun").checked,
   };
 }
@@ -37,9 +37,9 @@ async function loadSettings() {
     botToken: "",
     enabled: true,
     keyword: "",
-    minIntervalSec: 240,
-    maxIntervalSec: 300,
-    limit: 10,
+    minIntervalSec: 360,
+    maxIntervalSec: 540,
+    limit: 5,
     dryRun: true,
   });
   $("botId").value = String(data.botId || 1);
@@ -47,9 +47,9 @@ async function loadSettings() {
   $("botToken").value = data.botToken || "";
   $("enabled").checked = data.enabled !== false;
   $("keyword").value = data.keyword || "";
-  $("minInterval").value = data.minIntervalSec ?? 240;
-  $("maxInterval").value = data.maxIntervalSec ?? 300;
-  $("limit").value = data.limit ?? 10;
+  $("minInterval").value = data.minIntervalSec ?? 360;
+  $("maxInterval").value = data.maxIntervalSec ?? 540;
+  $("limit").value = data.limit ?? 5;
   $("dryRun").checked = Boolean(data.dryRun);
 }
 

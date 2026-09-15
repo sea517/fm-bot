@@ -5,7 +5,8 @@ const OUTREACH_URL = "https://www.freelancermap.com/freelancer";
 const INBOX_URL = "https://www.freelancermap.com/app/pobox/main";
 
 const JOB_POLL_MS = 12000;
-const CHAT_POLL_MS = 20000;
+const CHAT_POLL_MS = 45000;
+const CHAT_POLL_BUSY_MS = 90000;
 
 async function settings() {
   const s = await chrome.storage.sync.get({
@@ -75,15 +76,34 @@ async function findTabBy(pred) {
 
 /** Keep a dedicated search/DM tab (never reuse the inbox tab). */
 async function ensureOutreachTab({ activate = false } = {}) {
+  const { outreachTabId } = await chrome.storage.local.get({ outreachTabId: null });
+  if (outreachTabId) {
+    try {
+      const existing = await chrome.tabs.get(outreachTabId);
+      const url = existing.url || "";
+      if (
+        existing &&
+        /freelancermap\.(com|de)/i.test(url) &&
+        !isInboxUrl(url)
+      ) {
+        if (activate) await chrome.tabs.update(existing.id, { active: true });
+        return existing;
+      }
+    } catch (_e) {
+      /* tab closed */
+    }
+  }
+
   let tab = await findTabBy(isOutreachUrl);
   if (!tab) {
     // Prefer any non-inbox freelancermap tab, else create.
     const tabs = await chrome.tabs.query({
       url: ["https://www.freelancermap.com/*", "https://www.freelancermap.de/*"],
     });
-    tab = tabs.find((t) => !isInboxUrl(t.url || "")) || null;
+    tab = tabs.find((t) => !isInboxUrl(t.url || "") && !/\/profile\//i.test(t.url || "")) || null;
   }
   if (!tab) {
+    await chrome.storage.local.set({ allowFmTabCreateUntil: Date.now() + 5000 });
     tab = await chrome.tabs.create({ url: OUTREACH_URL, active: activate });
   } else if (!isOutreachUrl(tab.url || "") && !/\/freelancer\//i.test(tab.url || "")) {
     await chrome.tabs.update(tab.id, { url: OUTREACH_URL, active: activate });
@@ -97,8 +117,22 @@ async function ensureOutreachTab({ activate = false } = {}) {
 
 /** Keep a dedicated inbox tab for assessment chat. */
 async function ensureInboxTab({ activate = false } = {}) {
+  const { inboxTabId } = await chrome.storage.local.get({ inboxTabId: null });
+  if (inboxTabId) {
+    try {
+      const existing = await chrome.tabs.get(inboxTabId);
+      if (existing && isInboxUrl(existing.url || "")) {
+        if (activate) await chrome.tabs.update(existing.id, { active: true });
+        return existing;
+      }
+    } catch (_e) {
+      /* closed */
+    }
+  }
+
   let tab = await findTabBy(isInboxUrl);
   if (!tab) {
+    await chrome.storage.local.set({ allowFmTabCreateUntil: Date.now() + 5000 });
     tab = await chrome.tabs.create({ url: INBOX_URL, active: activate });
   } else if (!/\/app\/pobox/i.test(tab.url || "")) {
     await chrome.tabs.update(tab.id, { url: INBOX_URL, active: activate });
@@ -113,6 +147,61 @@ async function ensureInboxTab({ activate = false } = {}) {
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+/**
+ * Card title links often open /profile in a new tab. During an active job,
+ * close those stray tabs so Chrome does not flood.
+ */
+chrome.tabs.onCreated.addListener((tab) => {
+  setTimeout(async () => {
+    try {
+      const store = await chrome.storage.local.get({
+        activeJobId: null,
+        campaignStop: false,
+        outreachTabId: null,
+        inboxTabId: null,
+        allowFmTabCreateUntil: 0,
+      });
+      if (!store.activeJobId || store.campaignStop) return;
+      if (Date.now() < Number(store.allowFmTabCreateUntil || 0)) return;
+
+      let live;
+      try {
+        live = await chrome.tabs.get(tab.id);
+      } catch (_e) {
+        return;
+      }
+      const url = live.url || live.pendingUrl || "";
+      if (!/freelancermap\.(com|de)/i.test(url) && url !== "" && url !== "about:blank") {
+        return;
+      }
+      if (live.id === store.outreachTabId || live.id === store.inboxTabId) return;
+      if (isInboxUrl(url)) return;
+
+      // Wait briefly for URL to settle (new tabs often start blank)
+      await sleep(600);
+      try {
+        live = await chrome.tabs.get(tab.id);
+      } catch (_e) {
+        return;
+      }
+      const settled = live.url || "";
+      if (!/freelancermap\.(com|de)/i.test(settled)) return;
+      if (live.id === store.outreachTabId || live.id === store.inboxTabId) return;
+      if (isInboxUrl(settled)) return;
+
+      const isStrayProfile =
+        /\/profile\//i.test(settled) ||
+        (/[?&]id=\d+/i.test(settled) && live.id !== store.outreachTabId);
+      if (isStrayProfile || /\/freelancer/i.test(settled)) {
+        console.warn("closing stray freelancermap tab", settled);
+        await chrome.tabs.remove(live.id);
+      }
+    } catch (e) {
+      console.warn("stray tab guard failed", e);
+    }
+  }, 200);
+});
 
 const CONTENT_SCRIPTS = [
   "shared/templates.js",
@@ -263,9 +352,9 @@ async function startCampaignInTab(tab, job, { dry, skipSearch, resumeProfile, re
     keyword: job.keyword,
     subject: job.subject || "",
     messageBody: job.message_body || "",
-    minIntervalSec: Number(job.min_interval_sec) || 240,
-    maxIntervalSec: Number(job.max_interval_sec) || 300,
-    limit: Number(job.max_freelancers) || 10,
+    minIntervalSec: Number(job.min_interval_sec) || 360,
+    maxIntervalSec: Number(job.max_interval_sec) || 540,
+    limit: Math.min(Number(job.max_freelancers) || 5, 40),
     dryRun: dry,
     apiBaseUrl: s.apiBaseUrl,
     botId: s.botId,
@@ -320,6 +409,37 @@ async function startCampaignInTab(tab, job, { dry, skipSearch, resumeProfile, re
  * Inbox chat runs on its own tab and is never blocked by outreach.
  * Two Chrome tabs = DM campaign + chat at the same time.
  */
+async function runFollowUpPass(tabId) {
+  const s = await settings();
+  if (!s.enabled || !s.botToken) return;
+  try {
+    const data = await api(`/api/bots/${s.botId}/chat/follow-ups`);
+    const items = data?.follow_ups || [];
+    const item = items.find((x) => x?.applicant?.conversation_id && x?.reply);
+    if (!item) return;
+    const applicantId = item.applicant.id;
+    const conversationId = String(item.applicant.conversation_id);
+    console.info("follow-up due", applicantId, conversationId);
+    const sent = await sendToTab(tabId, {
+      type: "FM_CHAT_SEND",
+      conversation_id: conversationId,
+      text: item.reply,
+      send_after_sec: item.send_after_sec || 120,
+    });
+    if (sent?.ok) {
+      await api(`/api/bots/${s.botId}/chat/follow-ups/${applicantId}`, {
+        method: "POST",
+        body: { delivered: true },
+      });
+      console.info("follow-up delivered", applicantId);
+    } else {
+      console.warn("follow-up send failed", sent);
+    }
+  } catch (e) {
+    console.warn("follow-up pass failed", e);
+  }
+}
+
 async function runInboxChatPass() {
   const s = await settings();
   if (!s.enabled || !s.botToken) {
@@ -331,8 +451,8 @@ async function runInboxChatPass() {
     chatPassBusyAt: 0,
   });
   const busyAge = Date.now() - (store.chatPassBusyAt || 0);
-  // Clear stuck busy flag (SW kill / long pass) after 3 minutes
-  if (store.chatPassBusy && busyAge > 3 * 60 * 1000) {
+  // Clear stuck busy flag after max reply delay (10 min) + buffer
+  if (store.chatPassBusy && busyAge > 12 * 60 * 1000) {
     console.warn("inbox chat clearing stale chatPassBusy", busyAge, "ms");
     await chrome.storage.local.set({ chatPassBusy: false, chatPassBusyAt: 0 });
   } else if (store.chatPassBusy) {
@@ -357,6 +477,11 @@ async function runInboxChatPass() {
       count: result?.results?.length || 0,
       results: result?.results || [],
     });
+    // SPEC: at most one 48h follow-up — only when no inbound reply was sent this pass
+    const sentInbound = (result?.results || []).some((r) => r?.delayMs);
+    if (!sentInbound) {
+      await runFollowUpPass(tab.id);
+    }
   } catch (e) {
     console.warn("inbox chat pass failed", e);
   } finally {
@@ -364,7 +489,22 @@ async function runInboxChatPass() {
   }
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === "FM_AM_I_OUTREACH") {
+    chrome.storage.local
+      .get({ outreachTabId: null })
+      .then((store) => {
+        const tabId = sender.tab?.id;
+        sendResponse({
+          ok: Boolean(
+            tabId && store.outreachTabId && tabId === store.outreachTabId
+          ),
+          tabId: tabId || null,
+          outreachTabId: store.outreachTabId || null,
+        });
+      });
+    return true;
+  }
   if (msg?.type === "FM_JOB_EVENT") {
     settings().then(async (s) => {
       if (msg.jobId) {
@@ -406,6 +546,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           activeJobId: null,
           pendingCampaign: null,
           campaignLockUntil: 0,
+          campaignStop: true,
+          campaignAliveAt: 0,
         });
       } catch (e) {
         console.error(e);
@@ -492,29 +634,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
   if (msg?.type === "FM_CHAT_DUE") {
-    settings().then(async (s) => {
-      try {
-        const due = await api(`/api/bots/${s.botId}/chat/due`);
-        const items = [];
-        for (const row of due?.applicants || []) {
-          const sent = await api(`/api/bots/${s.botId}/chat/due/${row.id}`, {
-            method: "POST",
-          });
-          if (sent?.reply) {
-            items.push({
-              applicant_id: row.id,
-              conversation_id: row.conversation_id || sent.conversation_id,
-              reply: sent.reply,
-              stage: sent.stage,
-              action: sent.action,
-            });
-          }
-        }
-        sendResponse({ items });
-      } catch (e) {
-        sendResponse({ items: [], error: String(e) });
-      }
-    });
+    // Scheduled rejection drip removed (SPEC: no outbound without inbound).
+    sendResponse({ items: [] });
     return true;
   }
   return false;
@@ -522,12 +643,30 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
 async function pollJobs() {
   const s = await settings();
-  if (!s.enabled || !s.apiBaseUrl || !s.botToken) return;
+  if (!s.enabled || !s.apiBaseUrl || !s.botToken) {
+    console.info("job poll skip: enable Poll dashboard + set API URL + bot token");
+    return;
+  }
 
   try {
     const active = await api(`/api/bots/${s.botId}/jobs/active`);
     const job = active?.job;
     const { activeJobId } = await chrome.storage.local.get({ activeJobId: null });
+
+    // Queued on dashboard → claim immediately (do not wait for a later poll).
+    if (job?.status === "queued") {
+      await chrome.storage.local.set({ campaignStop: false });
+      await heartbeat("online");
+      const claimed = await api(`/api/bots/${s.botId}/jobs/claim`, { method: "POST" });
+      if (claimed?.job) {
+        console.info("claimed queued job", claimed.job.id);
+        await runClaimedJob(claimed.job, { revive: false });
+      } else {
+        console.warn("claim returned no job for queued", job.id);
+      }
+      return;
+    }
+
     const shouldHalt =
       job?.status === "cancel_requested" || (activeJobId && !job);
     if (shouldHalt) {
@@ -621,7 +760,10 @@ function scheduleJobPoll() {
 }
 
 function scheduleChatPoll() {
-  chrome.alarms.create("fm_chat", { when: Date.now() + CHAT_POLL_MS });
+  chrome.storage.local.get({ activeJobId: null }).then((store) => {
+    const ms = store.activeJobId ? CHAT_POLL_BUSY_MS : CHAT_POLL_MS;
+    chrome.alarms.create("fm_chat", { when: Date.now() + ms });
+  });
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {

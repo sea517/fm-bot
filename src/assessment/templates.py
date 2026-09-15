@@ -1,34 +1,35 @@
-"""Fixed freelancermap assessment messages (ASD-STE100)."""
+"""Fixed freelancermap assessment messages (deterministic layer)."""
 
 MSG_ASK_GITHUB = (
-    "Thank you. Our team will review your answers.\n"
-    "Next, I will send a short take-home assignment. "
-    "This assignment measures your development speed and quality.\n"
-    "Please send your GitHub username."
+    "The next step is a short practical assessment in a private GitHub repository, "
+    "about two to three hours of work. Our team reviews it.\n"
+    "Please send your GitHub username or profile link."
 )
 
 MSG_ASSIGNMENT_INVITED = (
-    "I invited you to the assignment repository. "
-    "Open your email and read all requirements in README.md.\n"
-    "I will review your work with our team in about 3 hours."
+    "I invited you to the assessment repository. "
+    "Check the email on your GitHub account, including spam, "
+    "read README.md, and reply here once you have submitted."
 )
 
 MSG_ASSIGNMENT_RECEIVED = (
-    "Thank you for your work. We will review it and tell you the result."
+    "Thanks — we received that. The team will review it. "
+    "Timing and next steps are in the repo README."
 )
 
-MSG_FINAL_REJECTION = (
-    "Hello {name},\n"
-    "Thank you for your time on this assessment. "
-    "We reviewed your work carefully. "
-    "We will continue with another candidate for this role.\n"
-    "We value your interest. "
-    "We may contact you again for a future product that fits your skills.\n"
-    "Thank you again. We wish you success."
+MSG_ORG_CLARIFY = (
+    "That link points to an organisation account. "
+    "Could you send your personal GitHub username? "
+    "The invite has to go to an individual account."
 )
 
+MSG_INVALID_USERNAME = (
+    "I could not find that GitHub user. "
+    "Please check the spelling or send your profile link "
+    "(for example https://github.com/yourname)."
+)
 
-def rejection_message(display_name: str | None) -> str:
-    first = (display_name or "").strip().split()[0] if display_name else ""
-    name = first or "there"
-    return MSG_FINAL_REJECTION.format(name=name)
+MSG_INVITE_HANDOFF_SOFT = (
+    "I am setting up the invite and a person will confirm it here. "
+    "Thanks for your patience."
+)

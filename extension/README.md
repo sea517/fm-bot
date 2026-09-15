@@ -29,14 +29,21 @@ The service worker keeps **two dedicated tabs**:
 
 Outreach never navigates the inbox tab, and inbox polling is **not paused** while a DM campaign is running.
 
-## Timing
+## Timing (account safety)
 
 | Loop | Interval |
 |------|----------|
 | Claim / manage outreach jobs | ~12s |
-| Check inbox for replies | **20s** |
-| Delay before sending a chat reply | **Random 5–120s per reply** (longer answers bias higher; never the same wait twice in a row) |
-| Delay between Contact DMs | **Random** between dashboard min/max interval (default 240–300s) |
+| Check inbox for replies | **45s** idle · **90s** while a DM job is active |
+| Delay before sending a chat reply | **Random 5–120s per reply** |
+| Delay between Contact DMs (live) | **≥6–9 min** (dashboard defaults 360–540s; extension enforces floor) |
+| UI step pace | **1.8–4.8s** random between clicks |
+| After failed open / missing Contact | **50–110s** cool-down; stop after 5 in a row |
+| After skip (already contacted / paywall) | **25–55s** |
+| Daily live send cap | **25** per Chrome profile |
+| Max freelancers / job | default **5** (hard max 40) |
+
+Dry-run can use shorter intervals. Live sends always apply the safety floors.
 
 ## Popup
 

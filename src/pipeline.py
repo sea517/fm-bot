@@ -15,13 +15,10 @@ from src.conversation.handler import (
     build_reply,
     is_action_due,
     on_candidate_message,
-    on_resume_email,
-    on_slack_email_reply,
 )
 from src.conversation.timing import (
     hours_later,
     schedule_after_candidate_message,
-    schedule_slack_after_message,
 )
 from src.ai.llm import active_model
 from src.config import DATA_DIR, POLL_INTERVAL_SECONDS, PROJECT_TITLE, active_ai_provider
@@ -523,43 +520,13 @@ def ingest_oliver_inbox(
             continue
         preview = (item.body or item.subject or "")[:800]
 
-        if applicant and applicant.stage == S.STAGE_WAITING_SLACK_EMAIL:
-            on_slack_email_reply(applicant, preview, item.from_email)
-            applicant.email_message_id = item.message_id
-            mark_processed(item.message_id)
-            logger.info("Slack-email reply from %s applicant=%s", item.from_email, applicant.id)
-            continue
-
-        if item.has_resume or (applicant and applicant.stage == S.STAGE_WAITING_EMAIL_RESUME):
-            if not applicant:
-                if only_id is not None or only_name or only_conversation:
-                    mark_processed(item.message_id)
-                    continue
-                # Never invent an applicant from noreply / empty real people
-                from_addr = (item.from_email or "").lower()
-                if (
-                    not from_addr
-                    or "noreply@" in from_addr
-                    or "no-reply@" in from_addr
-                    or "mailer-daemon@" in from_addr
-                ):
-                    logger.info("Ignoring resume-like mail from automated address %s", from_addr)
-                    mark_processed(item.message_id)
-                    continue
-                applicant = Applicant(
-                    freelancermap_message_id=f"email:{item.message_id}",
-                    name=item.from_name,
-                    email=item.from_email,
-                    message_preview=preview,
-                    stage=S.STAGE_WAITING_EMAIL_RESUME,
-                    reply_channel=S.CHANNEL_EMAIL,
-                )
-                session.add(applicant)
-                session.flush()
-            on_resume_email(applicant, preview, item.from_email, item.message_id)
-            mark_processed(item.message_id)
-            continue
-
+        # Email / Slack invite follow-up removed from conversation handler.
+        # Mark mail processed so the inbox does not retry forever.
+        logger.info(
+            "Ignoring Oliver email from %s (email channel removed) applicant=%s",
+            item.from_email,
+            applicant.id if applicant else None,
+        )
         mark_processed(item.message_id)
 
 
@@ -591,13 +558,9 @@ def ingest_slack_joins(session) -> None:
         if not candidate_has_joined_channel(channel_id):
             time.sleep(0.2)
             continue
-        applicant.reply_channel = S.CHANNEL_SLACK
-        # Short natural pause after join detection, then greet first.
-        applicant.next_action_at = schedule_slack_after_message(
-            "hi", require_business_hours=False
-        )
+        # Slack conversation channel removed — do not schedule welcome / set reply_channel.
         logger.info(
-            "Candidate joined Slack channel %s — scheduling welcome for applicant=%s (%s)",
+            "Candidate joined Slack channel %s — ignoring (Slack channel removed) applicant=%s (%s)",
             channel_id,
             applicant.id,
             applicant.name,

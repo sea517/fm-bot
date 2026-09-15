@@ -62,7 +62,7 @@
     }
   }
 
-  async function markContacted(settings, { name, profileKey, projectName }) {
+  async function markContacted(settings, { name, profileKey, projectName, subject, body }) {
     const slug = String(profileKey || name || "unknown")
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
@@ -88,6 +88,8 @@
             display_name: name || null,
             conversation_id: null,
             stage: "outreach_sent",
+            outreach_subject: subject || null,
+            outreach_body: body || null,
           },
         });
         return true;
