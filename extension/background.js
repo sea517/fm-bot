@@ -21,6 +21,89 @@ async function settings() {
   };
 }
 
+async function clearPendingChatAlarms() {
+  const all = await chrome.alarms.getAll();
+  for (const a of all) {
+    if (a.name && a.name.startsWith("fm_chat_send_")) {
+      await chrome.alarms.clear(a.name);
+    }
+  }
+  await chrome.storage.local.set({ pendingChatReplies: {} });
+}
+
+async function setLocalAutomationPaused(paused) {
+  if (paused) {
+    await disarmInboxChat("pause");
+    return;
+  }
+  await chrome.storage.local.set({
+    automationPaused: false,
+    campaignStop: false,
+  });
+  console.info("automation pause cleared (inboxArmed unchanged)");
+}
+
+async function armInboxChat() {
+  await chrome.storage.local.set({
+    inboxArmed: true,
+    automationPaused: false,
+    campaignStop: false,
+  });
+  scheduleChatPoll();
+  console.info("inbox chat armed");
+}
+
+async function disarmInboxChat(reason) {
+  await chrome.storage.local.set({
+    inboxArmed: false,
+    automationPaused: true,
+    campaignStop: true,
+  });
+  await clearPendingChatAlarms();
+  try {
+    await chrome.alarms.clear("fm_chat");
+  } catch (_e) {
+    /* ignore */
+  }
+  console.info("inbox chat disarmed:", reason || "");
+}
+
+async function readLocalPaused() {
+  const local = await chrome.storage.local.get({
+    automationPaused: true,
+    inboxArmed: false,
+  });
+  // Not armed → treat as paused (fail closed).
+  if (local.inboxArmed !== true) return true;
+  return local.automationPaused !== false;
+}
+
+async function syncAutomationPausedFromServer() {
+  const s = await settings();
+  if (!s.enabled || !s.apiBaseUrl || !s.botToken) return true;
+  try {
+    const botSettings = await api(`/api/bots/${s.botId}/settings`);
+    if (typeof botSettings?.automation_paused === "boolean") {
+      if (botSettings.automation_paused) {
+        await disarmInboxChat("server pause");
+        return true;
+      }
+      // Server resume does not arm inbox by itself — Start/claim does.
+      await chrome.storage.local.set({ automationPaused: false });
+      return readLocalPaused();
+    }
+    return readLocalPaused();
+  } catch (e) {
+    console.warn("settings sync failed — keeping local pause state", e);
+    return readLocalPaused();
+  }
+}
+
+async function isAutomationPaused() {
+  if (await readLocalPaused()) return true;
+  return syncAutomationPausedFromServer();
+}
+
 async function api(path, { method = "GET", body } = {}) {
   const s = await settings();
   if (!s.apiBaseUrl || !s.botToken) throw new Error("Configure API URL + bot token");
@@ -364,7 +447,7 @@ async function startCampaignInTab(tab, job, { dry, skipSearch, resumeProfile, re
     resumeProfile: Boolean(resumeProfile),
   };
 
-  await chrome.storage.local.set({
+  const patch = {
     campaignStop: false,
     activeJobId: job.id,
     activeBotId: s.botId,
@@ -373,10 +456,17 @@ async function startCampaignInTab(tab, job, { dry, skipSearch, resumeProfile, re
       phase: resumeProfile ? "on_profile" : "await_results",
       startedAt: Date.now(),
     },
-  });
+  };
+  // Arm inbox only on a fresh Start/claim — never on post-reboot revive.
+  if (!revive) {
+    patch.inboxArmed = true;
+    patch.automationPaused = false;
+  }
+  await chrome.storage.local.set(patch);
+  if (!revive) scheduleChatPoll();
 
   await heartbeat("busy");
-  ensureInboxTab({ activate: false }).catch(() => {});
+  // Inbox chat is started by pollChat only when armed — do not open Postfach here.
 
   await reportEvent(
     s.botId,
@@ -410,6 +500,7 @@ async function startCampaignInTab(tab, job, { dry, skipSearch, resumeProfile, re
  * Two Chrome tabs = DM campaign + chat at the same time.
  */
 async function runFollowUpPass(tabId) {
+  if (await isAutomationPaused()) return;
   const s = await settings();
   if (!s.enabled || !s.botToken) return;
   try {
@@ -420,23 +511,124 @@ async function runFollowUpPass(tabId) {
     const applicantId = item.applicant.id;
     const conversationId = String(item.applicant.conversation_id);
     console.info("follow-up due", applicantId, conversationId);
-    const sent = await sendToTab(tabId, {
-      type: "FM_CHAT_SEND",
+    // Schedule like normal replies (SPEC 2–10 min delay via alarm)
+    await scheduleChatReply({
       conversation_id: conversationId,
       text: item.reply,
       send_after_sec: item.send_after_sec || 120,
+      fingerprint: `followup:${applicantId}:${Date.now()}`,
+      applicant_id: applicantId,
+      is_follow_up: true,
     });
-    if (sent?.ok) {
-      await api(`/api/bots/${s.botId}/chat/follow-ups/${applicantId}`, {
-        method: "POST",
-        body: { delivered: true },
-      });
-      console.info("follow-up delivered", applicantId);
-    } else {
-      console.warn("follow-up send failed", sent);
-    }
   } catch (e) {
     console.warn("follow-up pass failed", e);
+  }
+}
+
+async function scheduleChatReply(payload) {
+  const id = String(payload.conversation_id);
+  const sec = Math.max(120, Math.min(600, Number(payload.send_after_sec) || 120));
+  const key = `pendingChat_${id}`;
+  const store = await chrome.storage.local.get({ pendingChatReplies: {} });
+  const map = store.pendingChatReplies || {};
+  if (map[id] && map[id].dueAt > Date.now() - 60000) {
+    console.info("chat reply already pending", id);
+    return { ok: true, deduped: true };
+  }
+  map[id] = {
+    ...payload,
+    conversation_id: id,
+    send_after_sec: sec,
+    dueAt: Date.now() + sec * 1000,
+  };
+  await chrome.storage.local.set({ pendingChatReplies: map });
+  chrome.alarms.create(`fm_chat_send_${id}`, { when: map[id].dueAt });
+  console.info("scheduled chat reply", id, "in", sec, "s");
+  return { ok: true };
+}
+
+async function deliverScheduledChatReply(conversationId) {
+  if (await isAutomationPaused()) {
+    console.info("skip scheduled chat — automation paused");
+    return;
+  }
+  const id = String(conversationId);
+  const store = await chrome.storage.local.get({ pendingChatReplies: {} });
+  const map = store.pendingChatReplies || {};
+  const pending = map[id];
+  if (!pending?.text) {
+    console.warn("no pending chat reply for", id);
+    return;
+  }
+  try {
+    // Fresh list first — opening a thread hides rows; content-script reload kills handlers.
+    let tab = await ensureInboxTab({ activate: false });
+    await chrome.tabs.update(tab.id, { url: INBOX_URL, active: false });
+    await sleep(3200);
+    tab = await chrome.tabs.get(tab.id);
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: CONTENT_SCRIPTS,
+    });
+    await sleep(800);
+    const sent = await sendToTab(tab.id, {
+      type: "FM_CHAT_SEND",
+      conversation_id: id,
+      text: pending.text,
+      send_after_sec: 0,
+    });
+    if (sent?.ok) {
+      console.info("delivered scheduled chat reply", id);
+      if (pending.applicant_id) {
+        try {
+          const s = await settings();
+          await api(`/api/bots/${s.botId}/chat/delivered`, {
+            method: "POST",
+            body: {
+              applicant_id: pending.applicant_id,
+              conversation_id: id,
+              body: pending.text,
+            },
+          });
+        } catch (e) {
+          console.warn("chat/delivered failed", e);
+        }
+      }
+      const fpsStore = await chrome.storage.local.get({
+        chatFingerprints: {},
+        chatLastOutbound: {},
+      });
+      const fps = fpsStore.chatFingerprints || {};
+      const outs = fpsStore.chatLastOutbound || {};
+      if (pending.fingerprint) fps[id] = pending.fingerprint;
+      outs[id] = String(pending.text || "").trim().slice(0, 240);
+      await chrome.storage.local.set({
+        chatFingerprints: fps,
+        chatLastOutbound: outs,
+      });
+      if (pending.is_follow_up && pending.applicant_id) {
+        const s = await settings();
+        await api(`/api/bots/${s.botId}/chat/follow-ups/${pending.applicant_id}`, {
+          method: "POST",
+          body: { delivered: true },
+        });
+      }
+      delete map[id];
+      await chrome.storage.local.set({ pendingChatReplies: map });
+    } else {
+      const tries = (pending.tries || 0) + 1;
+      map[id] = { ...pending, tries };
+      await chrome.storage.local.set({ pendingChatReplies: map });
+      console.warn("scheduled chat send failed", id, sent, "try", tries);
+      if (tries < 6) {
+        chrome.alarms.create(`fm_chat_send_${id}`, {
+          when: Date.now() + 60000,
+        });
+      }
+    }
+  } catch (e) {
+    console.warn("deliverScheduledChatReply failed", e);
+    chrome.alarms.create(`fm_chat_send_${id}`, { when: Date.now() + 60000 });
   }
 }
 
@@ -446,13 +638,17 @@ async function runInboxChatPass() {
     console.info("inbox chat skip: disabled or missing bot token");
     return;
   }
+  if (await isAutomationPaused()) {
+    console.info("inbox chat skip: automation paused (dashboard Stop)");
+    return;
+  }
   const store = await chrome.storage.local.get({
     chatPassBusy: false,
     chatPassBusyAt: 0,
   });
   const busyAge = Date.now() - (store.chatPassBusyAt || 0);
-  // Clear stuck busy flag after max reply delay (10 min) + buffer
-  if (store.chatPassBusy && busyAge > 12 * 60 * 1000) {
+  // Pass is short now (schedule only); 3 min stuck timeout
+  if (store.chatPassBusy && busyAge > 3 * 60 * 1000) {
     console.warn("inbox chat clearing stale chatPassBusy", busyAge, "ms");
     await chrome.storage.local.set({ chatPassBusy: false, chatPassBusyAt: 0 });
   } else if (store.chatPassBusy) {
@@ -477,9 +673,10 @@ async function runInboxChatPass() {
       count: result?.results?.length || 0,
       results: result?.results || [],
     });
-    // SPEC: at most one 48h follow-up — only when no inbound reply was sent this pass
-    const sentInbound = (result?.results || []).some((r) => r?.delayMs);
-    if (!sentInbound) {
+    const scheduled = (result?.results || []).some(
+      (r) => r?.reason === "scheduled" || r?.delayMs
+    );
+    if (!scheduled) {
       await runFollowUpPass(tab.id);
     }
   } catch (e) {
@@ -633,6 +830,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     });
     return true;
   }
+  if (msg?.type === "FM_SCHEDULE_CHAT_REPLY") {
+    scheduleChatReply(msg)
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (msg?.type === "FM_CHAT_RELOAD_INBOX") {
+    (async () => {
+      try {
+        const tab = await ensureInboxTab({ activate: false });
+        await chrome.tabs.update(tab.id, { url: INBOX_URL, active: false });
+        sendResponse({ ok: true });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e) });
+      }
+    })();
+    return true;
+  }
   if (msg?.type === "FM_CHAT_DUE") {
     // Scheduled rejection drip removed (SPEC: no outbound without inbound).
     sendResponse({ items: [] });
@@ -655,7 +870,7 @@ async function pollJobs() {
 
     // Queued on dashboard → claim immediately (do not wait for a later poll).
     if (job?.status === "queued") {
-      await chrome.storage.local.set({ campaignStop: false });
+      await armInboxChat();
       await heartbeat("online");
       const claimed = await api(`/api/bots/${s.botId}/jobs/claim`, { method: "POST" });
       if (claimed?.job) {
@@ -670,8 +885,8 @@ async function pollJobs() {
     const shouldHalt =
       job?.status === "cancel_requested" || (activeJobId && !job);
     if (shouldHalt) {
+      await disarmInboxChat("job halted");
       await chrome.storage.local.set({
-        campaignStop: true,
         activeJobId: null,
         pendingCampaign: null,
       });
@@ -688,6 +903,7 @@ async function pollJobs() {
     }
 
     // Job running: only revive if no content script is actively campaigning.
+    // Do not re-arm inbox here — after VPS/browser reboot inbox stays off until Start.
     if (job?.status === "running") {
       await chrome.storage.local.set({ activeJobId: job.id });
       const tabs = await chrome.tabs.query({
@@ -752,6 +968,16 @@ async function pollJobs() {
 async function pollChat() {
   const s = await settings();
   if (!s.enabled || !s.apiBaseUrl || !s.botToken) return;
+  const store = await chrome.storage.local.get({ inboxArmed: false });
+  if (store.inboxArmed !== true) {
+    console.info("inbox chat poll skipped — not armed (Start a job first)");
+    return;
+  }
+  const paused = await syncAutomationPausedFromServer();
+  if (paused) {
+    console.info("inbox chat poll skipped — paused");
+    return;
+  }
   await runInboxChatPass();
 }
 
@@ -760,10 +986,16 @@ function scheduleJobPoll() {
 }
 
 function scheduleChatPoll() {
-  chrome.storage.local.get({ activeJobId: null }).then((store) => {
-    const ms = store.activeJobId ? CHAT_POLL_BUSY_MS : CHAT_POLL_MS;
-    chrome.alarms.create("fm_chat", { when: Date.now() + ms });
-  });
+  chrome.storage.local
+    .get({ inboxArmed: false, automationPaused: true, activeJobId: null })
+    .then((store) => {
+      if (store.inboxArmed !== true || store.automationPaused !== false) {
+        console.info("chat poll not scheduled — inbox not armed");
+        return;
+      }
+      const ms = store.activeJobId ? CHAT_POLL_BUSY_MS : CHAT_POLL_MS;
+      chrome.alarms.create("fm_chat", { when: Date.now() + ms });
+    });
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -773,11 +1005,55 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "fm_chat") {
     pollChat().finally(scheduleChatPoll);
   }
+  if (alarm.name && alarm.name.startsWith("fm_chat_send_")) {
+    const conversationId = alarm.name.slice("fm_chat_send_".length);
+    deliverScheduledChatReply(conversationId).catch((e) =>
+      console.warn("alarm deliver failed", e)
+    );
+  }
 });
 
 scheduleJobPoll();
-scheduleChatPoll();
-// Unstick a busy flag left by a killed service worker
-chrome.storage.local.set({ chatPassBusy: false, chatPassBusyAt: 0 }).catch(() => {});
-pollJobs();
-pollChat();
+
+/** Always disarm inbox on browser/SW start — chrome.storage + alarms survive VPS reboot. */
+async function bootDisarmInbox() {
+  try {
+    const all = await chrome.alarms.getAll();
+    for (const a of all) {
+      if (
+        a.name === "fm_chat" ||
+        (a.name && a.name.startsWith("fm_chat_send_"))
+      ) {
+        await chrome.alarms.clear(a.name);
+      }
+    }
+  } catch (_e) {
+    /* ignore */
+  }
+  await chrome.storage.local.set({
+    inboxArmed: false,
+    automationPaused: true,
+    campaignStop: true,
+    pendingChatReplies: {},
+    chatPassBusy: false,
+    chatPassBusyAt: 0,
+    // Do not auto-revive inbox from a previous session
+  });
+  console.info(
+    "boot: inbox disarmed — open dashboard and click Start to enable inbox chat"
+  );
+}
+
+chrome.runtime.onStartup.addListener(() => {
+  bootDisarmInbox().catch((e) => console.warn("onStartup disarm failed", e));
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  bootDisarmInbox().catch((e) => console.warn("onInstalled disarm failed", e));
+});
+
+(async () => {
+  await bootDisarmInbox();
+  // Job poll may re-arm only if it claims/revives a live dashboard job.
+  pollJobs();
+})();

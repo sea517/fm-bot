@@ -121,9 +121,38 @@ $("btnSave").addEventListener("click", () => {
 
 $("btnStop").addEventListener("click", async () => {
   try {
-    await chrome.storage.local.set({ campaignStop: true });
-    await sendToTab({ type: "FM_STOP_CAMPAIGN" });
-    log("Stop requested.");
+    await chrome.storage.local.set({
+      campaignStop: true,
+      automationPaused: true,
+      inboxArmed: false,
+      pendingChatReplies: {},
+    });
+    const alarms = await chrome.alarms.getAll();
+    for (const a of alarms) {
+      if (a.name === "fm_chat" || (a.name && a.name.startsWith("fm_chat_send_"))) {
+        await chrome.alarms.clear(a.name);
+      }
+    }
+    try {
+      const s = readWorkerSettings();
+      if (s.apiBaseUrl && s.botToken) {
+        await fetch(`${s.apiBaseUrl}/api/bots/${s.botId}/automation/pause`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${s.botToken}`,
+          },
+        });
+      }
+    } catch (_e) {
+      /* local pause already applied */
+    }
+    try {
+      await sendToTab({ type: "FM_STOP_CAMPAIGN" });
+    } catch (_e) {
+      /* outreach tab may be closed */
+    }
+    log("Stopped — inbox disarmed. Dashboard Start will arm it again.");
   } catch (e) {
     log(String(e.message || e));
   }

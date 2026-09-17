@@ -6,6 +6,14 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 
+class ChatDeliverBody(BaseModel):
+    """Extension confirms a Postfach send so we may persist the bot message."""
+
+    applicant_id: int
+    conversation_id: str | None = None
+    body: str | None = None
+
+
 class CreateJobBody(BaseModel):
     keyword: str = Field(min_length=1, max_length=200)
     subject: str = Field(min_length=1, max_length=300)
@@ -140,6 +148,7 @@ class BotSettingsBody(BaseModel):
     outreach_body: str | None = None
     github_unlock_after_messages: int | None = Field(default=None, ge=8, le=30)
     max_messages_per_applicant: int | None = Field(default=None, ge=10, le=40)
+    automation_paused: bool | None = None
 
 
 class BotSettings(BaseModel):
@@ -149,4 +158,6 @@ class BotSettings(BaseModel):
     outreach_body: str = ""
     github_unlock_after_messages: int = 24
     max_messages_per_applicant: int = 30
+    # Dashboard Stop sets this; Start clears it. Extension pauses inbox+outreach.
+    automation_paused: bool = False
     updated_at: datetime | None = None

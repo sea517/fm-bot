@@ -30,6 +30,15 @@ async function api(path, opts = {}) {
   }
   if (!res.ok) {
     const detail = data?.detail || data?.raw || res.statusText;
+    if (Array.isArray(detail)) {
+      const msg = detail
+        .map((d) => {
+          const field = Array.isArray(d.loc) ? d.loc.filter((x) => x !== "body").join(".") : "";
+          return field ? `${field}: ${d.msg}` : d.msg || JSON.stringify(d);
+        })
+        .join("; ");
+      throw new Error(msg || JSON.stringify(detail));
+    }
     throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }
   return data;
@@ -200,8 +209,14 @@ async function refreshPipeline() {
     ? rows
         .map((a) => {
           const gh = a.github_username ? ` · gh:@${a.github_username}` : "";
-          const n = a.message_count != null ? ` · ${a.message_count} msgs` : "";
-          return `<div class="row"><div>${a.display_name || "—"} · <strong>${a.stage}</strong>${n}${gh}</div><div>${a.status}</div></div>`;
+          const n =
+            a.message_count != null
+              ? ` · ${a.message_count} delivered msgs`
+              : "";
+          const pend = (a.pending_reply || "").trim()
+            ? " · pending send"
+            : "";
+          return `<div class="row"><div>${a.display_name || "—"} · <strong>${a.stage}</strong>${n}${pend}${gh}</div><div>${a.status}</div></div>`;
         })
         .join("")
     : `<div class="muted">No applicants yet for Bot ${state.botId}.</div>`;
@@ -255,6 +270,17 @@ $("btnStart").addEventListener("click", async () => {
       alert("Enter subject and contact form before Start");
       return;
     }
+    const limitEl = $("limit");
+    let maxFreelancers = Number(limitEl.value);
+    if (!Number.isFinite(maxFreelancers) || maxFreelancers < 1) {
+      alert("Max freelancers must be between 1 and 40");
+      return;
+    }
+    if (maxFreelancers > 40) {
+      limitEl.value = "40";
+      alert("Max freelancers is capped at 40 per job (account safety). Value set to 40 — click Start again.");
+      return;
+    }
     setActionBusy("start", true, "Starting…");
     const body = {
       keyword,
@@ -262,7 +288,7 @@ $("btnStart").addEventListener("click", async () => {
       message_body: messageBody,
       min_interval_sec: Number($("minInterval").value),
       max_interval_sec: Number($("maxInterval").value),
-      max_freelancers: Number($("limit").value),
+      max_freelancers: maxFreelancers,
       dry_run: $("dryRun").checked,
     };
     await api(`/api/bots/${state.botId}/jobs`, {
@@ -283,17 +309,21 @@ $("btnStop").addEventListener("click", async () => {
   if (state.busyAction) return;
   try {
     setActionBusy("stop", true, "Stopping…");
-    const bot = await api(`/api/bots/${state.botId}`);
-    let job = await findActiveJob(bot);
-    if (!job && bot.current_job_id) {
-      job = { id: bot.current_job_id };
+    try {
+      await api(`/api/bots/${state.botId}/automation/pause`, { method: "POST" });
+    } catch (pauseErr) {
+      // Older API without /automation/pause — stop active job if present.
+      const bot = await api(`/api/bots/${state.botId}`);
+      let job = await findActiveJob(bot);
+      if (!job && bot.current_job_id) job = { id: bot.current_job_id };
+      if (job?.id) {
+        await api(`/api/bots/${state.botId}/jobs/${job.id}/stop`, {
+          method: "POST",
+        });
+      } else {
+        throw pauseErr;
+      }
     }
-    if (!job?.id) {
-      setRunControls(false);
-      return;
-    }
-    await api(`/api/bots/${state.botId}/jobs/${job.id}/stop`, { method: "POST" });
-    // Switch to Start immediately — server marks job stopped.
     setRunControls(false);
   } catch (e) {
     alert(e.message);

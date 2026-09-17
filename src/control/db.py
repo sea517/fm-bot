@@ -151,3 +151,98 @@ def sb_upsert(
         return []
     data = response.json()
     return data if isinstance(data, list) else [data]
+
+
+# Columns added by assessment_spec.sql — safe to drop if migration not applied yet.
+_OPTIONAL_APPLICANT_COLS = frozenset(
+    {
+        "pending_github",
+        "parsed_username",
+        "raw_github_string",
+        "validation_result",
+        "invite_result",
+        "handoff_reason",
+        "last_outbound_at",
+        "follow_up_sent",
+        "opted_out",
+        "screening_answers",
+        "github_invalid_retries",
+        "human_offer_sent",
+        "outreach_subject",
+        "outreach_body",
+        "pending_reply",
+        "pending_payload",
+        "last_freelancer_message_at",
+        "last_bot_message_at",
+        "github_username",
+        "rejection_due_at",
+    }
+)
+
+
+def _strip_optional(row: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in row.items() if k not in _OPTIONAL_APPLICANT_COLS}
+
+
+def sb_insert_flexible(
+    table: str,
+    row: dict[str, Any],
+    *,
+    return_representation: bool = True,
+) -> list[dict[str, Any]]:
+    """Insert; if PostgREST rejects unknown columns, retry without SPEC optional fields."""
+    try:
+        return sb_insert(table, row, return_representation=return_representation)
+    except requests.HTTPError as e:
+        resp = getattr(e, "response", None)
+        text = (resp.text if resp is not None else "") or ""
+        if resp is not None and resp.status_code in (400, 404) and (
+            "PGRST204" in text or "column" in text.lower()
+        ):
+            slim = _strip_optional(row)
+            logger.warning(
+                "Supabase INSERT %s retry without optional columns (%s)",
+                table,
+                sorted(set(row) - set(slim)),
+            )
+            return sb_insert(table, slim, return_representation=return_representation)
+        raise
+
+
+def sb_patch_flexible(
+    table: str,
+    *,
+    match: dict[str, str],
+    row: dict[str, Any],
+    return_representation: bool = True,
+) -> list[dict[str, Any]]:
+    """Patch; drop unknown optional columns and retry rather than failing the turn."""
+    try:
+        return sb_patch(
+            table,
+            match=match,
+            row=row,
+            return_representation=return_representation,
+        )
+    except requests.HTTPError as e:
+        resp = getattr(e, "response", None)
+        text = (resp.text if resp is not None else "") or ""
+        if resp is not None and resp.status_code in (400, 404) and (
+            "PGRST204" in text or "column" in text.lower()
+        ):
+            slim = _strip_optional(row)
+            if not slim:
+                logger.warning("Supabase PATCH %s skipped — only optional columns", table)
+                return []
+            logger.warning(
+                "Supabase PATCH %s retry without optional columns (%s)",
+                table,
+                sorted(set(row) - set(slim)),
+            )
+            return sb_patch(
+                table,
+                match=match,
+                row=slim,
+                return_representation=return_representation,
+            )
+        raise

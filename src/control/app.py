@@ -16,11 +16,20 @@ from fastapi.staticfiles import StaticFiles
 from src.ai.outreach_personalize import generate_unique_outreach_dm
 from src.assessment.engine import process_freelancer_message
 from src.control import auth
-from src.control.db import sb_get, sb_insert, sb_patch, sb_upsert, supabase_ok
+from src.control.db import (
+    sb_get,
+    sb_insert,
+    sb_insert_flexible,
+    sb_patch,
+    sb_patch_flexible,
+    sb_upsert,
+    supabase_ok,
+)
 from src.control.schemas import (
     ApplicantUpsertBody,
     BotSettings,
     BotSettingsBody,
+    ChatDeliverBody,
     ChatTurnBody,
     ContactUpsertBody,
     CreateJobBody,
@@ -229,6 +238,7 @@ def create_job(
             409,
             f"Bot {bot_id} already has an active job #{active[0]['id']} ({active[0]['status']})",
         )
+    _set_automation_paused(bot_id, False)
     rows = sb_insert(
         "outreach_jobs",
         {
@@ -258,6 +268,78 @@ def create_job(
     return job
 
 
+def _set_automation_paused(bot_id: int, paused: bool) -> None:
+    """Persist dashboard Stop/Start so the extension pauses inbox + outreach."""
+    current = _bot_settings(bot_id).model_dump(mode="json")
+    current["automation_paused"] = bool(paused)
+    current["updated_at"] = _now()
+    sb_patch(
+        "bots",
+        match={"id": f"eq.{bot_id}"},
+        row={"settings": current, "updated_at": _now()},
+        return_representation=False,
+    )
+
+
+@app.post("/api/bots/{bot_id}/automation/pause")
+def pause_automation(
+    bot_id: int,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Dashboard Stop: halt outreach job (if any) and pause inbox chat."""
+    auth.require_dashboard_or_bot(bot_id, authorization)
+    if bot_id not in (1, 2, 3):
+        raise HTTPException(404)
+    _require_supabase()
+    _finalize_cancel_requested(bot_id)
+    now = _now()
+    stopped_ids: list[int] = []
+    active = sb_get(
+        "outreach_jobs",
+        params={
+            "bot_id": f"eq.{bot_id}",
+            "status": "in.(queued,running,cancel_requested)",
+            "select": "id,status",
+            "limit": "10",
+        },
+    )
+    for job in active or []:
+        status = "cancelled" if job.get("status") == "queued" else "stopped"
+        sb_patch(
+            "outreach_jobs",
+            match={"id": f"eq.{job['id']}"},
+            row={
+                "status": status,
+                "finished_at": now,
+                "updated_at": now,
+            },
+            return_representation=False,
+        )
+        sb_insert(
+            "job_events",
+            {
+                "job_id": job["id"],
+                "bot_id": bot_id,
+                "level": "warn",
+                "message": "Stopped via dashboard (automation paused — inbox chat stopped too)",
+            },
+            return_representation=False,
+        )
+        stopped_ids.append(job["id"])
+    sb_patch(
+        "bots",
+        match={"id": f"eq.{bot_id}"},
+        row={
+            "status": "online",
+            "current_job_id": None,
+            "updated_at": now,
+        },
+        return_representation=False,
+    )
+    _set_automation_paused(bot_id, True)
+    return {"ok": True, "automation_paused": True, "stopped_job_ids": stopped_ids}
+
+
 @app.post("/api/bots/{bot_id}/jobs/{job_id}/stop")
 def stop_job(
     bot_id: int,
@@ -279,6 +361,7 @@ def stop_job(
         raise HTTPException(404, "job not found")
     job = jobs[0]
     if job["status"] in ("completed", "failed", "cancelled", "stopped"):
+        _set_automation_paused(bot_id, True)
         return job
     # Dashboard stop is immediate: mark stopped and free the bot.
     # Extension will see no active job on next poll and halt.
@@ -301,13 +384,14 @@ def stop_job(
         },
         return_representation=False,
     )
+    _set_automation_paused(bot_id, True)
     sb_insert(
         "job_events",
         {
             "job_id": job_id,
             "bot_id": bot_id,
             "level": "warn",
-            "message": "Stopped from dashboard",
+            "message": "Stopped from dashboard (automation paused — inbox chat stopped too)",
         },
         return_representation=False,
     )
@@ -881,7 +965,7 @@ def upsert_applicant(
         )
         return rows[0] if rows else existing
     settings = _bot_settings(bot_id)
-    rows = sb_insert(
+    rows = sb_insert_flexible(
         "fm_applicants",
         {
             "bot_id": bot_id,
@@ -953,7 +1037,7 @@ def chat_turn(
     )
     now = _now()
     if not applicant:
-        created = sb_insert(
+        created = sb_insert_flexible(
             "fm_applicants",
             {
                 "bot_id": bot_id,
@@ -983,7 +1067,7 @@ def chat_turn(
             link_patch["conversation_id"] = body.conversation_id
         if body.profile_key and not applicant.get("profile_key"):
             link_patch["profile_key"] = body.profile_key
-        sb_patch(
+        sb_patch_flexible(
             "fm_applicants",
             match={"id": f"eq.{applicant['id']}"},
             row=link_patch,
@@ -991,7 +1075,7 @@ def chat_turn(
         )
         applicant = {**applicant, **link_patch}
 
-    # Skip duplicate freelancer messages (extension re-poll of same inbox line)
+    # Skip duplicate freelancer messages, but redeliver pending/undelivered bot text.
     prior = sb_get(
         "fm_messages",
         params={
@@ -1003,6 +1087,48 @@ def chat_turn(
         },
     )
     if prior and (prior[0].get("body") or "").strip() == body.message.strip():
+        import random
+
+        pending = (applicant.get("pending_reply") or "").strip()
+        if pending:
+            return {
+                "applicant_id": applicant["id"],
+                "reply": pending,
+                "stage": applicant.get("stage"),
+                "message_count": applicant.get("message_count"),
+                "github_unlocked": applicant.get("github_unlocked"),
+                "github_username": applicant.get("github_username"),
+                "invite_ok": None,
+                "action": "redeliver_pending",
+                "send_after_sec": random.randint(120, 600),
+                "authorised": True,
+            }
+        last_any = sb_get(
+            "fm_messages",
+            params={
+                "applicant_id": f"eq.{applicant['id']}",
+                "select": "id,role,body",
+                "order": "id.desc",
+                "limit": "1",
+            },
+        )
+        if (
+            last_any
+            and last_any[0].get("role") == "bot"
+            and (last_any[0].get("body") or "").strip()
+        ):
+            return {
+                "applicant_id": applicant["id"],
+                "reply": last_any[0]["body"],
+                "stage": applicant.get("stage"),
+                "message_count": applicant.get("message_count"),
+                "github_unlocked": applicant.get("github_unlocked"),
+                "github_username": applicant.get("github_username"),
+                "invite_ok": None,
+                "action": "redeliver",
+                "send_after_sec": random.randint(120, 600),
+                "authorised": True,
+            }
         return {
             "applicant_id": applicant["id"],
             "reply": None,
@@ -1016,7 +1142,21 @@ def chat_turn(
             "authorised": False,
         }
 
-    # One outbound per inbound burst: if we already replied in the last 90s, coalesce.
+    # One outbound per inbound burst: if we already have a pending Postfach send, coalesce.
+    if (applicant.get("pending_reply") or "").strip():
+        return {
+            "applicant_id": applicant["id"],
+            "reply": applicant["pending_reply"],
+            "stage": applicant.get("stage"),
+            "message_count": applicant.get("message_count"),
+            "github_unlocked": applicant.get("github_unlocked"),
+            "github_username": applicant.get("github_username"),
+            "invite_ok": None,
+            "action": "pending",
+            "send_after_sec": 120,
+            "authorised": True,
+        }
+
     recent_bot = sb_get(
         "fm_messages",
         params={
@@ -1103,7 +1243,7 @@ def chat_turn(
         if result.patch.get("opted_out"):
             _record_opt_out(bot_id, applicant)
         if patch_only.keys() - {"updated_at"}:
-            sb_patch(
+            sb_patch_flexible(
                 "fm_applicants",
                 match={"id": f"eq.{applicant['id']}"},
                 row=patch_only,
@@ -1122,49 +1262,110 @@ def chat_turn(
             "authorised": False,
         }
 
-    patch: dict[str, Any] = {
+    # Authorised: stash reply as pending until Postfach send is confirmed.
+    # Pipeline message_count must NOT rise for undelivered ghost replies.
+    pending_payload: dict[str, Any] = {
         "stage": result.stage,
         "message_count": result.message_count,
         "github_unlocked": result.github_unlocked,
-        "updated_at": now,
-        "last_bot_message_at": now,
-        "last_outbound_at": now,
         **(result.patch or {}),
     }
     if result.github_username:
-        patch["github_username"] = result.github_username
+        pending_payload["github_username"] = result.github_username
     if result.patch.get("opted_out"):
-        _record_opt_out(bot_id, applicant)
-        patch["status"] = "closed"
+        pending_payload["status"] = "closed"
+        pending_payload["opted_out"] = True
     if result.action == "handoff":
-        patch["status"] = "closed"
+        pending_payload["status"] = "closed"
 
-    sb_insert(
-        "fm_messages",
-        {
-            "applicant_id": applicant["id"],
-            "role": "bot",
-            "body": result.reply,
-        },
-        return_representation=False,
-    )
-    sb_patch(
+    sb_patch_flexible(
         "fm_applicants",
         match={"id": f"eq.{applicant['id']}"},
-        row=patch,
+        row={
+            "pending_reply": result.reply,
+            "pending_payload": pending_payload,
+            "updated_at": now,
+        },
         return_representation=False,
     )
     return {
         "applicant_id": applicant["id"],
         "reply": result.reply,
-        "stage": result.stage,
-        "message_count": result.message_count,
+        "stage": applicant.get("stage"),
+        "message_count": applicant.get("message_count"),
         "github_unlocked": result.github_unlocked,
         "github_username": result.github_username,
         "invite_ok": result.invite_ok,
         "action": result.action,
         "send_after_sec": result.send_after_sec,
         "authorised": True,
+        "pending_delivery": True,
+    }
+
+
+@app.post("/api/bots/{bot_id}/chat/delivered")
+def chat_delivered(
+    bot_id: int,
+    body: ChatDeliverBody,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Persist bot message only after the extension confirms Postfach send."""
+    auth.require_bot(bot_id, authorization)
+    if bot_id not in (1, 2, 3):
+        raise HTTPException(404)
+    _require_supabase()
+    rows = sb_get(
+        "fm_applicants",
+        params={
+            "id": f"eq.{body.applicant_id}",
+            "bot_id": f"eq.{bot_id}",
+            "select": "*",
+            "limit": "1",
+        },
+    )
+    if not rows:
+        raise HTTPException(404, "applicant not found")
+    applicant = rows[0]
+    reply = (body.body or applicant.get("pending_reply") or "").strip()
+    if not reply:
+        return {"ok": False, "reason": "no_pending_reply"}
+
+    now = _now()
+    payload = applicant.get("pending_payload") or {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    sb_insert(
+        "fm_messages",
+        {
+            "applicant_id": applicant["id"],
+            "role": "bot",
+            "body": reply,
+        },
+        return_representation=False,
+    )
+    if payload.get("opted_out"):
+        _record_opt_out(bot_id, applicant)
+
+    patch = {
+        **payload,
+        "pending_reply": None,
+        "pending_payload": None,
+        "last_bot_message_at": now,
+        "last_outbound_at": now,
+        "updated_at": now,
+    }
+    sb_patch_flexible(
+        "fm_applicants",
+        match={"id": f"eq.{applicant['id']}"},
+        row=patch,
+        return_representation=False,
+    )
+    return {
+        "ok": True,
+        "applicant_id": applicant["id"],
+        "stage": patch.get("stage") or applicant.get("stage"),
+        "message_count": patch.get("message_count") or applicant.get("message_count"),
     }
 
 
@@ -1178,26 +1379,32 @@ def _is_opted_out(bot_id: int, applicant: dict[str, Any]) -> bool:
     if name:
         keys.append(name)
     for key in keys:
-        rows = sb_get(
-            "fm_opt_outs",
-            params={
-                "identity_key": f"eq.{key}",
-                "select": "id",
-                "limit": "1",
-            },
-        )
-        if rows:
-            return True
-        # also try lower name
-        if key == name and name:
+        try:
             rows = sb_get(
                 "fm_opt_outs",
                 params={
-                    "identity_key": f"eq.{name.lower()}",
+                    "identity_key": f"eq.{key}",
                     "select": "id",
                     "limit": "1",
                 },
             )
+        except Exception:
+            logger.warning("fm_opt_outs lookup failed — run assessment_spec.sql")
+            return bool(applicant.get("opted_out"))
+        if rows:
+            return True
+        if key == name and name:
+            try:
+                rows = sb_get(
+                    "fm_opt_outs",
+                    params={
+                        "identity_key": f"eq.{name.lower()}",
+                        "select": "id",
+                        "limit": "1",
+                    },
+                )
+            except Exception:
+                return bool(applicant.get("opted_out"))
             if rows:
                 return True
     return bool(applicant.get("opted_out"))

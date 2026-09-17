@@ -174,6 +174,10 @@ alter table public.fm_applicants
   add column if not exists outreach_subject text;
 alter table public.fm_applicants
   add column if not exists outreach_body text;
+alter table public.fm_applicants
+  add column if not exists pending_reply text;
+alter table public.fm_applicants
+  add column if not exists pending_payload jsonb;
 
 create table if not exists public.fm_opt_outs (
   id bigint generated always as identity primary key,
