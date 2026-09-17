@@ -47,8 +47,8 @@
         <div class="grid2">
           <label>Keyword<input id="keyword" type="text" placeholder="FastAPI Next.js" /></label>
           <label>Max freelancers<input id="limit" type="number" value="5" min="1" max="40" title="Max 40 per job" /></label>
-          <label>Min interval (sec)<input id="minInterval" type="number" value="360" min="60" title="Live jobs enforce ≥360s" /></label>
-          <label>Max interval (sec)<input id="maxInterval" type="number" value="540" min="60" title="Live jobs enforce ≥540s" /></label>
+          <label>Min interval (sec)<input id="minInterval" type="number" value="480" min="60" title="Live jobs enforce ≥480s (8 min)" /></label>
+          <label>Max interval (sec)<input id="maxInterval" type="number" value="900" min="60" title="Live jobs enforce ≥900s (15 min)" /></label>
         </div>
         <label>Subject
           <input id="subject" type="text" placeholder="Email subject…" />
@@ -64,8 +64,9 @@
         </label>
         <label class="check"><input id="dryRun" type="checkbox" checked /> Dry run (don’t send)</label>
         <p class="muted" style="margin:0.5rem 0 0;font-size:0.85em">
-          Account safety: live DMs wait ≥6–9 min, max 5 freelancers/job (cap 40),
-          daily cap 25 sends, cool-downs after failed opens, stop after repeated failures.
+          Account safety: live DMs wait ≥8–15 min, max 40 freelancers/job,
+          daily cap 18 sends, work hours 09:00–18:00 EDT (lunch + breaks, no weekends),
+          cool-downs after failed opens, stop after repeated failures.
         </p>
       </section>
 

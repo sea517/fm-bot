@@ -99,8 +99,8 @@
 
   /** Account-safety floors (live sends). Dry-run may go faster. */
   const SAFETY = {
-    minDmSec: 360, // 6 min between real DMs
-    maxDmSec: 540, // 9 min
+    minDmSec: 480, // 8 min between real DMs (more human than a steady 6–9)
+    maxDmSec: 900, // 15 min
     stepMinMs: 1800,
     stepMaxMs: 4800,
     skipMinSec: 25,
@@ -111,7 +111,37 @@
     openFailMaxSec: 110,
     maxConsecutiveFails: 4,
     maxConsecutiveOpenFails: 5,
-    dailySendCap: 25,
+    dailySendCap: 18, // humans rarely blast 25 cold DMs/day
+  };
+
+  /**
+   * Human-like calendar in America/New_York (EDT/EST): work day only,
+   * lunch break, occasional longer pauses. VPS local time is ignored.
+   */
+  const HUMAN = {
+    timeZone: "America/New_York",
+    workStartHour: 9,
+    workEndHour: 18,
+    lunchStartHour: 12,
+    lunchStartMinute: 20,
+    lunchMinMinutes: 40,
+    lunchMaxMinutes: 75,
+    // After this many live sends in a session, take a longer break
+    breakAfterMinSends: 3,
+    breakAfterMaxSends: 5,
+    breakMinSec: 12 * 60, // 12–40 minutes
+    breakMaxSec: 40 * 60,
+    skipWeekends: true,
+  };
+
+  const EDT_WEEKDAY = {
+    Sun: 0,
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6,
   };
 
   function clampDmInterval(settings) {
@@ -126,6 +156,193 @@
       maxSec = Math.max(maxSec, minSec);
     }
     return { minSec, maxSec };
+  }
+
+  function edtParts(when = new Date()) {
+    const fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: HUMAN.timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      weekday: "short",
+      hourCycle: "h23",
+    });
+    const bag = Object.fromEntries(
+      fmt.formatToParts(when).map((p) => [p.type, p.value])
+    );
+    let hour = Number(bag.hour);
+    if (hour === 24) hour = 0;
+    return {
+      year: Number(bag.year),
+      month: Number(bag.month),
+      day: Number(bag.day),
+      hour,
+      minute: Number(bag.minute),
+      second: Number(bag.second),
+      weekday: EDT_WEEKDAY[bag.weekday] ?? 0,
+    };
+  }
+
+  /** Wall-clock America/New_York → Date (UTC instant). */
+  function dateFromEdt(y, month, day, hour, minute, second = 0) {
+    let utc = Date.UTC(y, month - 1, day, hour, minute, second);
+    for (let i = 0; i < 3; i++) {
+      const p = edtParts(new Date(utc));
+      const shown = Date.UTC(
+        p.year,
+        p.month - 1,
+        p.day,
+        p.hour,
+        p.minute,
+        p.second
+      );
+      const want = Date.UTC(y, month - 1, day, hour, minute, second);
+      utc += want - shown;
+    }
+    return new Date(utc);
+  }
+
+  function isWeekendEdt(when = new Date()) {
+    const day = edtParts(when).weekday;
+    return day === 0 || day === 6;
+  }
+
+  function addEdtCalendarDays(parts, days) {
+    // Noon EDT avoids DST edge when advancing calendar days.
+    const noon = dateFromEdt(parts.year, parts.month, parts.day, 12, 0, 0);
+    return edtParts(new Date(noon.getTime() + days * 86_400_000));
+  }
+
+  function lunchWindowToday() {
+    const start =
+      HUMAN.lunchStartHour * 60 +
+      HUMAN.lunchStartMinute +
+      Math.floor(Math.random() * 25); // jitter start
+    const dur =
+      HUMAN.lunchMinMinutes +
+      Math.floor(
+        Math.random() * (HUMAN.lunchMaxMinutes - HUMAN.lunchMinMinutes + 1)
+      );
+    return { start, end: start + dur };
+  }
+
+  let sessionLunch = null;
+  let sendsSinceBreak = 0;
+  let nextBreakAfter = HUMAN.breakAfterMinSends;
+
+  function ensureLunchWindow() {
+    if (!sessionLunch) sessionLunch = lunchWindowToday();
+    return sessionLunch;
+  }
+
+  function formatEdt(when) {
+    return when.toLocaleString("en-US", {
+      timeZone: HUMAN.timeZone,
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short",
+    });
+  }
+
+  function msUntilWorkAllowed() {
+    const now = new Date();
+    const parts = edtParts(now);
+    const mins = parts.hour * 60 + parts.minute;
+    const start = HUMAN.workStartHour * 60;
+    const end = HUMAN.workEndHour * 60;
+    const lunch = ensureLunchWindow();
+
+    function atWorkStart(dayParts) {
+      return dateFromEdt(
+        dayParts.year,
+        dayParts.month,
+        dayParts.day,
+        HUMAN.workStartHour,
+        0,
+        0
+      );
+    }
+
+    if (HUMAN.skipWeekends && isWeekendEdt(now)) {
+      // Next Monday 09:00 EDT
+      const add = parts.weekday === 0 ? 1 : 8 - parts.weekday;
+      const mon = addEdtCalendarDays(parts, add);
+      return Math.max(60_000, atWorkStart(mon).getTime() - now.getTime());
+    }
+
+    if (mins < start) {
+      return Math.max(60_000, atWorkStart(parts).getTime() - now.getTime());
+    }
+    if (mins >= end) {
+      let next = addEdtCalendarDays(parts, 1);
+      while (HUMAN.skipWeekends && (next.weekday === 0 || next.weekday === 6)) {
+        next = addEdtCalendarDays(next, 1);
+      }
+      return Math.max(60_000, atWorkStart(next).getTime() - now.getTime());
+    }
+    if (mins >= lunch.start && mins < lunch.end) {
+      const resume = dateFromEdt(
+        parts.year,
+        parts.month,
+        parts.day,
+        Math.floor(lunch.end / 60),
+        lunch.end % 60,
+        0
+      );
+      return Math.max(60_000, resume.getTime() - now.getTime());
+    }
+    return 0;
+  }
+
+  async function waitWhileHumanWouldRest(settings, label) {
+    if (isDryRun(settings)) return true;
+    // Cap single sleep chunks so Stop stays responsive; recompute window each wake.
+    for (;;) {
+      if (await shouldStop()) return false;
+      const ms = msUntilWorkAllowed();
+      if (ms <= 0) return true;
+      const chunk = Math.min(ms, 60_000);
+      const until = new Date(Date.now() + ms);
+      await emitLog(
+        `${label || "Human schedule"}: pausing ~${Math.round(ms / 60000)} min (until ${formatEdt(until)})…`
+      );
+      const end = Date.now() + chunk;
+      while (Date.now() < end) {
+        if (await shouldStop()) return false;
+        await sleep(Math.min(2000, end - Date.now()));
+        await touchCampaignAlive();
+      }
+    }
+  }
+
+  async function maybeLongHumanBreak(settings) {
+    if (isDryRun(settings)) return true;
+    sendsSinceBreak += 1;
+    if (sendsSinceBreak < nextBreakAfter) return true;
+    sendsSinceBreak = 0;
+    nextBreakAfter =
+      HUMAN.breakAfterMinSends +
+      Math.floor(
+        Math.random() *
+          (HUMAN.breakAfterMaxSends - HUMAN.breakAfterMinSends + 1)
+      );
+    const ms = randomIntervalMs(HUMAN.breakMinSec, HUMAN.breakMaxSec);
+    await emitLog(
+      `Human break ${Math.round(ms / 60000)} min (coffee / other work) before next DM…`
+    );
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (await shouldStop()) return false;
+      await sleep(Math.min(2000, end - Date.now()));
+      await touchCampaignAlive();
+    }
+    return waitWhileHumanWouldRest(settings, "After break");
   }
 
   /** Random human-like pause between outreach UI steps. */
@@ -165,7 +382,11 @@
   }
 
   function todayKey() {
-    return new Date().toISOString().slice(0, 10);
+    // Daily cap rolls on the EDT calendar day, not UTC/VPS local.
+    const p = edtParts();
+    const mm = String(p.month).padStart(2, "0");
+    const dd = String(p.day).padStart(2, "0");
+    return `${p.year}-${mm}-${dd}`;
   }
 
   async function getDailySentCount() {
@@ -1442,10 +1663,13 @@
   }
 
   async function waitBetweenDms(settings) {
+    if (!(await waitWhileHumanWouldRest(settings, "Work hours"))) return false;
+    if (!(await maybeLongHumanBreak(settings))) return false;
+    if (!(await waitWhileHumanWouldRest(settings, "Work hours"))) return false;
     const { minSec, maxSec } = clampDmInterval(settings);
     const waitMs = randomIntervalMs(minSec, maxSec);
     await emitLog(
-      `Waiting ${Math.round(waitMs / 1000)}s before next DM (safe band ${minSec}–${maxSec}s)…`
+      `Waiting ${Math.round(waitMs / 1000)}s before next DM (band ${minSec}–${maxSec}s)…`
     );
     const end = Date.now() + waitMs;
     while (Date.now() < end) {
@@ -1453,7 +1677,7 @@
       await sleep(Math.min(1000, end - Date.now()));
       await touchCampaignAlive();
     }
-    return true;
+    return waitWhileHumanWouldRest(settings, "Work hours");
   }
 
   function isQuickSkipReason(reason) {
@@ -1568,6 +1792,19 @@
     await emitLog(
       `Account safety: DM interval ≥${minSec}–${maxSec}s · daily cap ${SAFETY.dailySendCap} · step pace ${SAFETY.stepMinMs / 1000}–${SAFETY.stepMaxMs / 1000}s`
     );
+    await emitLog(
+      `Human schedule: ${HUMAN.workStartHour}:00–${HUMAN.workEndHour}:00 EDT` +
+        `${HUMAN.skipWeekends ? ", no weekends" : ""}` +
+        `, lunch break, longer pause every ${HUMAN.breakAfterMinSends}–${HUMAN.breakAfterMaxSends} sends`
+    );
+    sessionLunch = null;
+    sendsSinceBreak = 0;
+    nextBreakAfter =
+      HUMAN.breakAfterMinSends +
+      Math.floor(
+        Math.random() *
+          (HUMAN.breakAfterMaxSends - HUMAN.breakAfterMinSends + 1)
+      );
 
     const stats = {
       attempted: 0,
@@ -1589,6 +1826,15 @@
       campaignRunning = false;
       activeJobId = null;
       return { ok: false, reason: "daily_cap", stats };
+    }
+
+    if (!(await waitWhileHumanWouldRest(settings, "Before first DM"))) {
+      finishStatus = "stopped";
+      finishError = "stopped";
+      await finishJob(finishStatus, stats, finishError);
+      campaignRunning = false;
+      activeJobId = null;
+      return { ok: false, reason: "stopped", stats };
     }
 
     async function pushLiveStats(extra = {}) {

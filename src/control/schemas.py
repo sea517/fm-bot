@@ -19,9 +19,9 @@ class CreateJobBody(BaseModel):
     subject: str = Field(min_length=1, max_length=300)
     message_body: str = Field(min_length=1, max_length=8000)
     dry_run: bool = True
-    # Account-safety defaults: ≥6–9 minutes between live DMs
-    min_interval_sec: int = Field(default=360, ge=60, le=3600)
-    max_interval_sec: int = Field(default=540, ge=60, le=7200)
+    # Account-safety defaults: ≥8–15 minutes between live DMs
+    min_interval_sec: int = Field(default=480, ge=60, le=3600)
+    max_interval_sec: int = Field(default=900, ge=60, le=7200)
     max_freelancers: int = Field(default=5, ge=1, le=40)
 
     @field_validator("keyword")
@@ -43,19 +43,19 @@ class CreateJobBody(BaseModel):
     @field_validator("min_interval_sec")
     @classmethod
     def floor_min_interval(cls, v: int, info) -> int:
-        # Live jobs cannot go below 6 minutes even if the UI posts a lower value.
+        # Live jobs cannot go below 8 minutes even if the UI posts a lower value.
         dry = info.data.get("dry_run", True)
-        if dry is False and v < 360:
-            return 360
+        if dry is False and v < 480:
+            return 480
         return v
 
     @field_validator("max_interval_sec")
     @classmethod
     def max_ge_min(cls, v: int, info) -> int:
-        mn = info.data.get("min_interval_sec", 360)
+        mn = info.data.get("min_interval_sec", 480)
         dry = info.data.get("dry_run", True)
-        if dry is False and v < 540:
-            v = max(v, 540)
+        if dry is False and v < 900:
+            v = max(v, 900)
         if v < mn:
             raise ValueError("max_interval_sec must be >= min_interval_sec")
         return v
